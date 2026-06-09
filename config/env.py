@@ -76,6 +76,9 @@ MCP_USE_DOCKER = os.getenv("MCP_USE_DOCKER", "False") == "True"
 # Hermes agent runtime (delegated research-agent runtime for Research Mode)
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://127.0.0.1:8642")
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "dev-spike-local")
+# DARE writes its canonical soul into the gateway profile's SOUL.md (the anchor).
+HERMES_SYNC_SOUL = os.getenv("HERMES_SYNC_SOUL", "True") == "True"
+HERMES_SOUL_PATH = os.getenv("HERMES_SOUL_PATH", os.path.expanduser("~/.hermes/SOUL.md"))
 
 # Database toggle for local development
 # Set to True to use PostgreSQL (same as staging/prod), False for SQLite

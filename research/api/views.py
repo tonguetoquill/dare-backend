@@ -165,6 +165,9 @@ class ResearchChatView(APIView):
         )
 
         hermes = get_hermes_service()
+        # Anchor: write DARE's soul into the gateway SOUL.md (read fresh each
+        # run); instructions remain a resilient fallback overlay.
+        hermes.provision_soul(soul_content)
         try:
             started = hermes.start_run(
                 input_text=message,
@@ -311,6 +314,8 @@ class ResearchScoutView(APIView):
         )
 
         hermes = get_hermes_service()
+        # Anchor DARE's soul into the gateway SOUL.md before the run.
+        hermes.provision_soul(soul_content)
         try:
             started = hermes.start_run(
                 input_text=task,
@@ -535,4 +540,6 @@ class ResearchSoulFileView(APIView):
             change_note=change_note,
             created_by=request.user,
         )
+        # Keep the Hermes profile SOUL.md in sync with the new version.
+        get_hermes_service().provision_soul(content)
         return Response(self._serialize(soul))

@@ -9,6 +9,7 @@ gives Hermes DB access; this is the only place DARE talks to Hermes.
 
 import json
 import logging
+from pathlib import Path
 
 import requests
 from django.conf import settings
@@ -73,6 +74,28 @@ class HermesService:
                     logger.warning(
                         "Hermes SSE: could not parse event line: %s", payload[:200]
                     )
+
+    def provision_soul(self, content):
+        """
+        Write DARE's canonical soul into the gateway profile's SOUL.md — the
+        anchor (slot #1 of the system prompt) that Hermes reads fresh each run.
+        This is how DARE's soul actually governs, kept in sync on every edit/run.
+
+        No-op (returns False) if syncing is disabled or the path isn't writable;
+        the per-run ``instructions`` overlay then remains the fallback.
+        """
+        if not settings.HERMES_SYNC_SOUL:
+            return False
+        try:
+            Path(settings.HERMES_SOUL_PATH).write_text(content or "", encoding="utf-8")
+            return True
+        except OSError as exc:
+            logger.warning(
+                "Could not provision Hermes SOUL.md at %s: %s",
+                settings.HERMES_SOUL_PATH,
+                exc,
+            )
+            return False
 
     def get_run(self, hermes_run_id, timeout=30):
         """Poll a run's status/result (``{status, output, usage, model, ...}``)."""
