@@ -9,6 +9,7 @@ from research.api.views import (
     ResearchChatView,
     ResearchProjectViewSet,
     ResearchScoutView,
+    ResearchSoulFileView,
     ResearchStagingItemReviewView,
 )
 
@@ -25,6 +26,11 @@ urlpatterns = [
         "projects/<int:project_id>/scout/",
         ResearchScoutView.as_view(),
         name="research-scout",
+    ),
+    path(
+        "projects/<int:project_id>/soul/",
+        ResearchSoulFileView.as_view(),
+        name="research-soul",
     ),
     path(
         "staging-items/<int:item_id>/review/",

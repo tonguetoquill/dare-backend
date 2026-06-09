@@ -28,6 +28,7 @@ from research.constants import (
     AgentToolCallStatus,
     ChatMessageRole,
     ResearchSessionMode,
+    SoulFileOrigin,
     StagingItemStatus,
 )
 from research.models import (
@@ -39,6 +40,7 @@ from research.models import (
     ResearchSession,
     ResearchStagingItem,
     SoulFile,
+    SoulFileVersion,
 )
 from research.services import (
     build_scout_instructions,
@@ -53,15 +55,17 @@ class ResearchProjectViewSet(
     mixins.CreateModelMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
     Research projects owned by the authenticated researcher.
 
     Endpoints:
-    - GET  /api/research/projects/       - list the user's projects
-    - POST /api/research/projects/       - create a project
-    - GET  /api/research/projects/{id}/  - retrieve a single project
+    - GET   /api/research/projects/       - list the user's projects
+    - POST  /api/research/projects/       - create a project
+    - GET   /api/research/projects/{id}/  - retrieve a single project
+    - PATCH /api/research/projects/{id}/  - update a project
     """
 
     serializer_class = ResearchProjectSerializer
@@ -472,3 +476,63 @@ class ResearchStagingItemReviewView(APIView):
             )
 
         return Response(ResearchStagingItemSerializer(item).data)
+
+
+class ResearchSoulFileView(APIView):
+    """
+    The project's versioned soul file (standards).
+
+    - GET /api/research/projects/{id}/soul/  - the current version
+    - PUT /api/research/projects/{id}/soul/  {content, changeNote?} - write a new
+      version (the old one is kept; staging items keep the version that governed
+      them).
+    """
+
+    permission_classes = [IsAuthenticated, IsResearcherOrAbove]
+
+    def _project(self, request, project_id):
+        return get_object_or_404(
+            ResearchProject.active_objects, id=project_id, user=request.user
+        )
+
+    def _serialize(self, soul):
+        version = soul.current_version() if soul else None
+        if not version:
+            return None
+        return {
+            "id": soul.id,
+            "version": version.version,
+            "content": version.content,
+            "origin": version.origin,
+            "updatedAt": version.created_at,
+        }
+
+    def get(self, request, project_id):
+        project = self._project(request, project_id)
+        soul = SoulFile.active_objects.filter(project=project).first()
+        return Response(self._serialize(soul))
+
+    def put(self, request, project_id):
+        project = self._project(request, project_id)
+        content = request.data.get("content")
+        if content is None:
+            return Response(
+                {"error": "'content' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        change_note = request.data.get("change_note") or ""
+        soul, _ = SoulFile.objects.get_or_create(project=project)
+        latest = (
+            SoulFileVersion.active_objects.filter(soul_file=soul)
+            .order_by("-version")
+            .first()
+        )
+        SoulFileVersion.objects.create(
+            soul_file=soul,
+            version=(latest.version + 1) if latest else 1,
+            content=content,
+            origin=SoulFileOrigin.EDIT,
+            change_note=change_note,
+            created_by=request.user,
+        )
+        return Response(self._serialize(soul))
