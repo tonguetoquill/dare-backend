@@ -6,6 +6,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from research.api.views import (
+    ResearchAgentMemoryView,
     ResearchAgentRunView,
     ResearchChatView,
     ResearchProjectViewSet,
@@ -48,6 +49,11 @@ urlpatterns = [
         "agent-runs/<int:run_id>/",
         ResearchAgentRunView.as_view(),
         name="research-agent-run",
+    ),
+    path(
+        "agent-memory/",
+        ResearchAgentMemoryView.as_view(),
+        name="research-agent-memory",
     ),
     path("", include(router.urls)),
 ]

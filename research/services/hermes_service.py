@@ -97,6 +97,27 @@ class HermesService:
             )
             return False
 
+    def read_agent_memory(self):
+        """
+        Read the Hermes profile's operational memory files (read-only), so DARE
+        can show what the agent holds: the on-disk SOUL.md (which DARE provisions
+        — so it mirrors the project's soul), plus MEMORY.md / USER.md that Hermes
+        auto-writes as it learns. Returns {} values for files that don't exist yet.
+        """
+        home = Path(settings.HERMES_SOUL_PATH).parent
+
+        def _read(path):
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                return ""
+
+        return {
+            "soul": _read(home / "SOUL.md"),
+            "memory": _read(home / "memories" / "MEMORY.md"),
+            "user": _read(home / "memories" / "USER.md"),
+        }
+
     def get_run(self, hermes_run_id, timeout=30):
         """Poll a run's status/result (``{status, output, usage, model, ...}``)."""
         resp = requests.get(

@@ -85,12 +85,14 @@ def run_scout_job(run_id):
 
     chunks = []
     searches = 0
+    last_preview = ""
     try:
         for event in hermes.stream_events(hermes_run_id):
             etype = event.get("event")
             if etype == "message.delta":
                 chunks.append(event.get("delta", ""))
             elif etype == "tool.started":
+                last_preview = event.get("preview") or ""
                 _set_status(run, "Searching the web…")
             elif etype == "tool.completed":
                 searches += 1
@@ -98,7 +100,7 @@ def run_scout_job(run_id):
                 ResearchAgentToolCall.objects.create(
                     run=run,
                     tool=event.get("tool", ""),
-                    arguments={"query": task},
+                    arguments={"query": last_preview or task},
                     status=(
                         AgentToolCallStatus.ERROR
                         if event.get("error")
@@ -194,19 +196,21 @@ def run_critic_job(run_id, item_id):
     run.save(update_fields=["hermes_run_id", "updated_at"])
 
     chunks = []
+    last_preview = ""
     try:
         for event in hermes.stream_events(hermes_run_id):
             etype = event.get("event")
             if etype == "message.delta":
                 chunks.append(event.get("delta", ""))
             elif etype == "tool.started":
+                last_preview = event.get("preview") or ""
                 _set_status(run, "Reading the source…")
             elif etype == "tool.completed":
                 duration = event.get("duration")
                 ResearchAgentToolCall.objects.create(
                     run=run,
                     tool=event.get("tool", ""),
-                    arguments={"itemId": item.id},
+                    arguments={"itemId": item.id, "query": last_preview},
                     status=(
                         AgentToolCallStatus.ERROR
                         if event.get("error")

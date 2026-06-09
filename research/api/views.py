@@ -371,6 +371,20 @@ class ResearchStagingItemCriticView(APIView):
         )
 
 
+class ResearchAgentMemoryView(APIView):
+    """
+    GET /api/research/agent-memory/ — the Hermes profile's operational memory
+    files (SOUL.md, MEMORY.md, USER.md), read-only, for the Agent Memory view.
+    SOUL.md mirrors the project soul DARE provisions; MEMORY/USER are what Hermes
+    auto-writes as it learns.
+    """
+
+    permission_classes = [IsAuthenticated, IsResearcherOrAbove]
+
+    def get(self, request):
+        return Response(get_hermes_service().read_agent_memory())
+
+
 class ResearchStagingItemReviewView(APIView):
     """
     Scholar review of a staged candidate.
