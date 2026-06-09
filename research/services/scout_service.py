@@ -15,9 +15,18 @@ logger = logging.getLogger(__name__)
 
 SCOUT_BRIEF = """You are Scout, a research source-finder working under the scholar's standards above.
 
-Use the web_search tool to find real, relevant, recent sources for the task. Be
-efficient: run AT MOST 3 web searches, then stop and report. Never fabricate —
-only include sources you actually found via web_search.
+Workflow — search first, then READ before you stage:
+1. SEARCH. Use the scholar's connected research MCP tools (e.g. consensus__search,
+   scite__search_literature) and/or web_search to find real, relevant sources for
+   the task. Credentialed results may already be provided in the input — use them.
+   Run AT MOST %(max_searches)d search calls total.
+2. READ. For the most promising candidates, take the candidate's url (or DOI link)
+   and fetch it with the `fetch_page` MCP tool — it is fast; prefer it over any
+   browser or extract tool. Use what you read to confirm relevance, pull a short
+   citation-context quote, and ground your confidence. Fetch AT MOST
+   %(max_candidates)d pages.
+3. Never fabricate — only include sources you actually found, with bibliographic
+   details exactly as published.
 
 Return ONLY a single JSON object — no prose, no markdown code fences — shaped exactly:
 {"stagingItems": [
@@ -37,12 +46,15 @@ Return ONLY a single JSON object — no prose, no markdown code fences — shape
 Return %(max_candidates)d items at most. `confidence` is a number from 0.0 to 1.0."""
 
 
-def build_scout_instructions(soul_content, max_candidates=4):
+def build_scout_instructions(soul_content, max_candidates=4, max_searches=4):
     """Compose the run instructions: the soul file (standards) + the Scout brief."""
     parts = []
     if soul_content and soul_content.strip():
         parts.append("# Research standards (soul file)\n" + soul_content.strip())
-    parts.append(SCOUT_BRIEF % {"max_candidates": max_candidates})
+    parts.append(
+        SCOUT_BRIEF
+        % {"max_candidates": max_candidates, "max_searches": max_searches}
+    )
     return "\n\n".join(parts)
 
 

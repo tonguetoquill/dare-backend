@@ -34,7 +34,7 @@ from research.services import (
     parse_critic_verdict,
     parse_staging_items,
 )
-from mcp.services.mcp_gateway import gather_tool_context
+from mcp.services.mcp_gateway import gather_tool_results
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +78,23 @@ def run_scout_job(run_id):
     _set_status(run, "Querying research tools…")
     scout_input = task
     try:
-        mcp_context = gather_tool_context(run.user, project.enabled_tools, task)
+        tool_results = gather_tool_results(run.user, project.enabled_tools, task)
     except Exception as exc:  # noqa: BLE001 - non-fatal
         logger.warning("Scout MCP context gather failed: %s", exc)
-        mcp_context = ""
+        tool_results = []
+    # These credentialed pre-fetch calls are part of the run's audit trail too —
+    # log them with a result preview so the Runs view shows what came back.
+    for r in tool_results:
+        ResearchAgentToolCall.objects.create(
+            run=run,
+            tool=f"{r['slug']}__{r['tool']}",
+            arguments={"query": task},
+            status=AgentToolCallStatus.SUCCESS,
+            result_summary=r["text"][:500],
+        )
+    mcp_context = "\n\n".join(
+        f"### {r['slug']} · {r['tool']}\n{r['text']}" for r in tool_results
+    )
     if mcp_context:
         scout_input = (
             f"{task}\n\n"
