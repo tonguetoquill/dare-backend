@@ -16,16 +16,41 @@ from asgiref.sync import async_to_sync
 
 from mcp.models import UserMCPConnection
 from mcp.services.mcp_tool_executor import mcp_tool_executor
+from mcp.services.web_fetch import fetch_page
 
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
 _SEP = "__"  # namespace separator: <server_slug>__<tool_name>
 
+# DARE-native gateway tools — available to every agent regardless of which MCP
+# servers the user connected. No namespace prefix (they're the gateway's own).
+_BUILTIN_TOOL_DEFS = [
+    {
+        "name": "fetch_page",
+        "description": (
+            "Fetch a web page (article, abstract, paper landing page) and "
+            "return its readable text. Fast — prefer this over any browser or "
+            "extract tool for reading links found by search tools."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The http(s) URL to read"}
+            },
+            "required": ["url"],
+        },
+    },
+]
+
+_BUILTIN_HANDLERS = {
+    "fetch_page": lambda user, arguments: fetch_page(str(arguments.get("url") or "")),
+}
+
 
 def list_user_tools(user):
     """Namespaced tool definitions from the user's active connections."""
-    tools = []
+    tools = list(_BUILTIN_TOOL_DEFS)
     connections = UserMCPConnection.all_objects.filter(
         user=user, is_active=True, is_deleted=False
     ).select_related("server")
@@ -90,21 +115,22 @@ def _query_param(tool):
     return string_props[0] if string_props else None
 
 
-def gather_tool_context(user, slugs, query, per_tool_chars=4000):
+def gather_tool_results(user, slugs, query, per_tool_chars=4000):
     """
     Run the primary tool of each of the user's connected servers whose slug is in
-    `slugs`, with {query}, and return a text block of the results — so a delegated
-    run (Scout) can draw on credentialed tools (Consensus, …) that DARE executes
-    on its behalf. Synchronous (for jobs); best-effort, failures are skipped.
-    Credentials and audit stay in DARE (calls go through the executor).
+    `slugs`, with {query} — so a delegated run (Scout) can draw on credentialed
+    tools (Consensus, Scite, …) that DARE executes on its behalf. Returns
+    [{"slug", "tool", "text"}, ...]. Synchronous (for jobs); best-effort,
+    failures are skipped. Credentials and audit stay in DARE (calls go through
+    the executor).
     """
     wanted = {s.lower() for s in (slugs or [])}
     if not wanted:
-        return ""
+        return []
     connections = UserMCPConnection.all_objects.filter(
         user=user, is_active=True, is_deleted=False
     ).select_related("server")
-    blocks = []
+    results = []
     for conn in connections:
         slug = conn.server.slug
         if slug.lower() not in wanted:
@@ -117,7 +143,7 @@ def gather_tool_context(user, slugs, query, per_tool_chars=4000):
         param = _query_param(tool)
         if not param:
             logger.warning(
-                "gather_tool_context: %s.%s has no string param for a query; skipped",
+                "gather_tool_results: %s.%s has no string param for a query; skipped",
                 slug,
                 tool_name,
             )
@@ -127,12 +153,22 @@ def gather_tool_context(user, slugs, query, per_tool_chars=4000):
                 user, slug, tool_name, {param: query}
             )
         except Exception as exc:  # noqa: BLE001 - best-effort
-            logger.warning("gather_tool_context %s.%s failed: %s", slug, tool_name, exc)
+            logger.warning("gather_tool_results %s.%s failed: %s", slug, tool_name, exc)
             continue
         text = _result_text(result).strip()
         if text:
-            blocks.append(f"### {slug} · {tool_name}\n{text[:per_tool_chars]}")
-    return "\n\n".join(blocks)
+            results.append(
+                {"slug": slug, "tool": tool_name, "text": text[:per_tool_chars]}
+            )
+    return results
+
+
+def gather_tool_context(user, slugs, query, per_tool_chars=4000):
+    """`gather_tool_results` as one text block, for prompt injection."""
+    return "\n\n".join(
+        f"### {r['slug']} · {r['tool']}\n{r['text']}"
+        for r in gather_tool_results(user, slugs, query, per_tool_chars)
+    )
 
 
 def _result(rpc_id, result):
@@ -172,6 +208,13 @@ def handle_jsonrpc(user, payload):
         params = payload.get("params") or {}
         name = params.get("name", "")
         arguments = params.get("arguments") or {}
+        if name in _BUILTIN_HANDLERS:
+            try:
+                text = _BUILTIN_HANDLERS[name](user, arguments)
+            except Exception as exc:  # noqa: BLE001 - surface as a tool error
+                logger.warning("MCP gateway builtin %s failed: %s", name, exc)
+                return _error(rpc_id, -32000, str(exc))
+            return _result(rpc_id, {"content": [{"type": "text", "text": text}]})
         if _SEP not in name:
             return _error(rpc_id, -32602, f"Unknown tool: {name!r}")
         server_slug, tool_name = name.split(_SEP, 1)
