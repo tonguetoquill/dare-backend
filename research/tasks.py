@@ -20,14 +20,17 @@ from research.constants import (
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
+    ResearchArtifact,
     ResearchStagingItem,
     SoulFile,
 )
 from research.services import (
+    build_artifact_instructions,
     build_critic_instructions,
     build_scout_instructions,
     critic_input,
     get_hermes_service,
+    parse_artifacts,
     parse_critic_verdict,
     parse_staging_items,
 )
@@ -241,5 +244,75 @@ def run_critic_job(run_id, item_id):
 
     run.status = AgentRunStatus.COMPLETED
     run.status_detail = detail
+    run.completed_at = now
+    run.save(update_fields=["status", "status_detail", "completed_at", "updated_at"])
+
+
+@job("default")
+def run_artifact_job(run_id):
+    """Generate a renderable artifact via the JSON contract and persist it."""
+    run = ResearchAgentRun.objects.filter(id=run_id).first()
+    if not run:
+        logger.warning("run_artifact_job: run %s not found", run_id)
+        return
+
+    project = run.project
+    artifact_type = (run.selected_context or {}).get("artifactType", "")
+    soul = SoulFile.active_objects.filter(project=project).first()
+    version = soul.current_version() if soul else None
+    soul_content = version.content if version else ""
+
+    hermes = get_hermes_service()
+    hermes.provision_soul(soul_content)
+
+    _set_status(run, "Generating artifact…")
+    try:
+        started = hermes.start_run(
+            input_text=run.task,
+            instructions=build_artifact_instructions(soul_content, artifact_type),
+            session_id=run.session.hermes_session_id,
+        )
+        hermes_run_id = started["run_id"]
+    except Exception as exc:  # noqa: BLE001
+        _fail(run, "Could not reach the agent runtime.", exc)
+        return
+
+    run.hermes_run_id = hermes_run_id
+    run.save(update_fields=["hermes_run_id", "updated_at"])
+
+    chunks = []
+    try:
+        for event in hermes.stream_events(hermes_run_id):
+            etype = event.get("event")
+            if etype == "message.delta":
+                chunks.append(event.get("delta", ""))
+            elif etype == "run.completed":
+                break
+    except Exception as exc:  # noqa: BLE001
+        _fail(run, "The artifact run was interrupted.", exc)
+        return
+
+    now = timezone.now()
+    created = 0
+    for art in parse_artifacts("".join(chunks)):
+        try:
+            ResearchArtifact.objects.create(
+                project=project,
+                run=run,
+                artifact_type=art["artifact_type"],
+                title=art["title"][:255],
+                content=art["content"],
+                source="hermes",
+                provenance={"runId": run.id, "retrievedAt": now.isoformat()},
+            )
+            created += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Artifact create failed: %s", exc)
+
+    plural = "s" if created != 1 else ""
+    run.status = AgentRunStatus.COMPLETED
+    run.status_detail = (
+        f"Generated {created} artifact{plural}." if created else "No artifact produced."
+    )
     run.completed_at = now
     run.save(update_fields=["status", "status_detail", "completed_at", "updated_at"])

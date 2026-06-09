@@ -8,6 +8,7 @@ from rest_framework.routers import DefaultRouter
 from research.api.views import (
     ResearchAgentMemoryView,
     ResearchAgentRunView,
+    ResearchArtifactGenerateView,
     ResearchChatView,
     ResearchProjectViewSet,
     ResearchScoutView,
@@ -34,6 +35,11 @@ urlpatterns = [
         "projects/<int:project_id>/soul/",
         ResearchSoulFileView.as_view(),
         name="research-soul",
+    ),
+    path(
+        "projects/<int:project_id>/artifact/",
+        ResearchArtifactGenerateView.as_view(),
+        name="research-artifact-generate",
     ),
     path(
         "staging-items/<int:item_id>/review/",

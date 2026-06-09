@@ -34,7 +34,6 @@ from research.constants import (
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
-    ResearchArtifact,
     ResearchChatMessage,
     ResearchKnowledgeItem,
     ResearchProject,
@@ -43,8 +42,8 @@ from research.models import (
     SoulFile,
     SoulFileVersion,
 )
-from research.services import extract_artifacts, get_hermes_service
-from research.tasks import run_critic_job, run_scout_job
+from research.services import get_hermes_service
+from research.tasks import run_artifact_job, run_critic_job, run_scout_job
 
 logger = logging.getLogger(__name__)
 
@@ -240,27 +239,14 @@ class ResearchChatView(APIView):
                 )
                 return
 
-            full_reply = "".join(chunks)
             assistant_message = ResearchChatMessage.objects.create(
                 session=session,
                 project=project,
                 user=request.user,
                 role=ChatMessageRole.ASSISTANT,
-                content=full_reply,
+                content="".join(chunks),
                 run=run,
             )
-            # Promote any renderable fenced blocks (mermaid/html/svg/excalidraw)
-            # the agent produced into durable, typed artifacts.
-            for art in extract_artifacts(full_reply):
-                ResearchArtifact.objects.create(
-                    project=project,
-                    run=run,
-                    artifact_type=art["artifact_type"],
-                    title=art["title"],
-                    content=art["content"],
-                    source="hermes",
-                    provenance={"runId": run.id, "messageId": assistant_message.id},
-                )
             run.status = AgentRunStatus.COMPLETED
             run.completed_at = timezone.now()
             run.save(update_fields=["status", "completed_at", "updated_at"])
@@ -379,6 +365,55 @@ class ResearchStagingItemCriticView(APIView):
             started_at=timezone.now(),
         )
         run_critic_job.delay(run.id, item.id)
+        return Response(
+            {"runId": run.id, "status": run.status},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class ResearchArtifactGenerateView(APIView):
+    """
+    POST /api/research/projects/{id}/artifact/ {prompt, artifactType?} — enqueue a
+    delegated run that produces a renderable artifact via the JSON contract.
+    Returns {runId}; poll GET /agent-runs/{id}/. The artifact lands in the project.
+    """
+
+    permission_classes = [IsAuthenticated, IsResearcherOrAbove]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(
+            ResearchProject.active_objects, id=project_id, user=request.user
+        )
+        prompt = (request.data.get("prompt") or "").strip()
+        if not prompt:
+            return Response(
+                {"error": "A non-empty 'prompt' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        artifact_type = (
+            request.data.get("artifact_type") or request.data.get("artifactType") or ""
+        ).strip()
+
+        session = ResearchSession.get_or_create_scout_session(project, request.user)
+        soul = SoulFile.active_objects.filter(project=project).first()
+        version = soul.current_version() if soul else None
+        soul_label = f"v{version.version}" if version else ""
+
+        run = ResearchAgentRun.objects.create(
+            session=session,
+            project=project,
+            user=request.user,
+            role="presenter",
+            mode=ResearchSessionMode.SCOUT,
+            task=prompt,
+            status=AgentRunStatus.RUNNING,
+            status_detail="Queued…",
+            soul_file_version=soul_label,
+            allowed_tools=["skills"],
+            selected_context={"artifactType": artifact_type},
+            started_at=timezone.now(),
+        )
+        run_artifact_job.delay(run.id)
         return Response(
             {"runId": run.id, "status": run.status},
             status=status.HTTP_202_ACCEPTED,

@@ -1,4 +1,7 @@
-from research.services.artifact_service import extract_artifacts
+from research.services.artifact_service import (
+    build_artifact_instructions,
+    parse_artifacts,
+)
 from research.services.critic_service import (
     build_critic_instructions,
     critic_input,
@@ -18,5 +21,6 @@ __all__ = [
     "build_critic_instructions",
     "critic_input",
     "parse_critic_verdict",
-    "extract_artifacts",
+    "build_artifact_instructions",
+    "parse_artifacts",
 ]
