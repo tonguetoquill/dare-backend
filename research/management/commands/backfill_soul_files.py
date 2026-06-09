@@ -33,6 +33,4 @@ class Command(BaseCommand):
             )
             created += 1
             self.stdout.write(f"  soul file created for project {project.id}")
-        self.stdout.write(
-            self.style.SUCCESS(f"Backfilled {created} soul file(s).")
-        )
+        self.stdout.write(self.style.SUCCESS(f"Backfilled {created} soul file(s)."))

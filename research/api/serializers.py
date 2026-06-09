@@ -12,16 +12,19 @@ from rest_framework import serializers
 from research.constants import (
     MemoryProposalStatus,
     SourceType,
+    StagingItemStatus,
     soul_template_content,
 )
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
     ResearchChatMessage,
+    ResearchKnowledgeItem,
     ResearchMemoryProposal,
     ResearchProject,
     ResearchProjectMemory,
     ResearchSource,
+    ResearchStagingItem,
     SoulFile,
     SoulFileVersion,
 )
@@ -69,12 +72,12 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
         ]
 
     def get_pending_review_count(self, obj):
-        # Wired to staging items in a later increment.
-        return 0
+        return ResearchStagingItem.active_objects.filter(
+            project=obj, status=StagingItemStatus.STAGED
+        ).count()
 
     def get_approved_count(self, obj):
-        # Wired to approved knowledge items in a later increment.
-        return 0
+        return ResearchKnowledgeItem.active_objects.filter(project=obj).count()
 
     def get_source_count(self, obj):
         return ResearchSource.active_objects.filter(project=obj).count()
@@ -217,6 +220,108 @@ class ResearchChatMessageSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class ResearchStagingItemSerializer(serializers.ModelSerializer):
+    """A staged review candidate — the canonical §11 shape (camelCased)."""
+
+    class Meta:
+        model = ResearchStagingItem
+        fields = [
+            "id",
+            "title",
+            "authors",
+            "year",
+            "venue",
+            "doi",
+            "url",
+            "abstract",
+            "rationale",
+            "confidence",
+            "confidence_rationale",
+            "evidence_label",
+            "citation_context",
+            "provenance",
+            "status",
+            "rejection_reason",
+            "later_reason",
+            "critic_metadata",
+            "review_metadata",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ResearchKnowledgeItemSerializer(serializers.ModelSerializer):
+    """
+    Approved durable knowledge. Bibliographic display fields are read from the
+    source staging item (the contract references it rather than duplicating it).
+    """
+
+    title = serializers.SerializerMethodField()
+    authors = serializers.SerializerMethodField()
+    year = serializers.SerializerMethodField()
+    venue = serializers.SerializerMethodField()
+    url = serializers.SerializerMethodField()
+    confidence = serializers.SerializerMethodField()
+    evidence_label = serializers.SerializerMethodField()
+    citation_context = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ResearchKnowledgeItem
+        fields = [
+            "id",
+            "title",
+            "authors",
+            "year",
+            "venue",
+            "url",
+            "rationale",
+            "confidence",
+            "evidence_label",
+            "citation_context",
+            "provenance",
+            "soul_file_version",
+            "used_in",
+            "approved_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def _staged(self, obj):
+        return obj.source_staging_item
+
+    def get_title(self, obj):
+        s = self._staged(obj)
+        return s.title if s else ""
+
+    def get_authors(self, obj):
+        s = self._staged(obj)
+        return s.authors if s else ""
+
+    def get_year(self, obj):
+        s = self._staged(obj)
+        return s.year if s else None
+
+    def get_venue(self, obj):
+        s = self._staged(obj)
+        return s.venue if s else ""
+
+    def get_url(self, obj):
+        s = self._staged(obj)
+        return s.url if s else ""
+
+    def get_confidence(self, obj):
+        s = self._staged(obj)
+        return s.confidence if s else None
+
+    def get_evidence_label(self, obj):
+        s = self._staged(obj)
+        return s.evidence_label if s else ""
+
+    def get_citation_context(self, obj):
+        s = self._staged(obj)
+        return s.citation_context if s else ""
+
+
 class ResearchProjectDetailSerializer(ResearchProjectSerializer):
     """
     Single-project payload for the workspace (GET /api/research/projects/{id}/).
@@ -232,6 +337,8 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
     soul_file = serializers.SerializerMethodField()
     project_memory = serializers.SerializerMethodField()
     memory_proposals = serializers.SerializerMethodField()
+    review_items = serializers.SerializerMethodField()
+    knowledge_items = serializers.SerializerMethodField()
 
     class Meta(ResearchProjectSerializer.Meta):
         fields = ResearchProjectSerializer.Meta.fields + [
@@ -239,6 +346,8 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
             "soul_file",
             "project_memory",
             "memory_proposals",
+            "review_items",
+            "knowledge_items",
         ]
 
     def get_runs(self, obj):
@@ -269,9 +378,9 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
         }
 
     def get_project_memory(self, obj):
-        memory = ResearchProjectMemory.active_objects.filter(
-            project=obj
-        ).order_by("-created_at")
+        memory = ResearchProjectMemory.active_objects.filter(project=obj).order_by(
+            "-created_at"
+        )
         return ResearchProjectMemorySerializer(memory, many=True).data
 
     def get_memory_proposals(self, obj):
@@ -279,3 +388,15 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
             project=obj, status=MemoryProposalStatus.PROPOSED
         ).order_by("-created_at")
         return ResearchMemoryProposalSerializer(proposals, many=True).data
+
+    def get_review_items(self, obj):
+        items = ResearchStagingItem.active_objects.filter(project=obj).order_by(
+            "-created_at"
+        )
+        return ResearchStagingItemSerializer(items, many=True).data
+
+    def get_knowledge_items(self, obj):
+        items = ResearchKnowledgeItem.active_objects.filter(project=obj).order_by(
+            "-created_at"
+        )
+        return ResearchKnowledgeItemSerializer(items, many=True).data

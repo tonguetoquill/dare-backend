@@ -4,6 +4,7 @@ ViewSets and views for the Research app API.
 
 import json
 import logging
+import time
 
 from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
@@ -20,22 +21,30 @@ from research.api.serializers import (
     ResearchChatMessageSerializer,
     ResearchProjectDetailSerializer,
     ResearchProjectSerializer,
+    ResearchStagingItemSerializer,
 )
 from research.constants import (
     AgentRunStatus,
     AgentToolCallStatus,
     ChatMessageRole,
     ResearchSessionMode,
+    StagingItemStatus,
 )
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
     ResearchChatMessage,
+    ResearchKnowledgeItem,
     ResearchProject,
     ResearchSession,
+    ResearchStagingItem,
     SoulFile,
 )
-from research.services import get_hermes_service
+from research.services import (
+    build_scout_instructions,
+    get_hermes_service,
+    parse_staging_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,9 +210,7 @@ class ResearchChatView(APIView):
                                 if event.get("error")
                                 else AgentToolCallStatus.SUCCESS
                             ),
-                            duration_ms=(
-                                int(duration * 1000) if duration else None
-                            ),
+                            duration_ms=(int(duration * 1000) if duration else None),
                             error=event.get("error") or "",
                         )
                         yield _sse(
@@ -255,3 +262,213 @@ class ResearchChatView(APIView):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+
+class ResearchScoutView(APIView):
+    """
+    Delegated Scout discovery for a project.
+
+    POST /api/research/projects/{id}/scout/  — runs Scout on Hermes (web search),
+    waits for it to finish, and persists the returned source candidates as staging
+    items (status='staged') with full provenance. They then appear in the Review
+    Inbox. Returns {runId, stagedCount}.
+    """
+
+    permission_classes = [IsAuthenticated, IsResearcherOrAbove]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(
+            ResearchProject.active_objects, id=project_id, user=request.user
+        )
+        task = (request.data.get("task") or request.data.get("query") or "").strip()
+        if not task:
+            return Response(
+                {"error": "A non-empty 'task' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session = ResearchSession.get_or_create_scout_session(project, request.user)
+        soul = SoulFile.active_objects.filter(project=project).first()
+        version = soul.current_version() if soul else None
+        soul_content = version.content if version else ""
+        soul_label = f"v{version.version}" if version else ""
+
+        run = ResearchAgentRun.objects.create(
+            session=session,
+            project=project,
+            user=request.user,
+            role="scout",
+            mode=ResearchSessionMode.SCOUT,
+            task=task,
+            status=AgentRunStatus.RUNNING,
+            soul_file_version=soul_label,
+            allowed_tools=["web"],
+            started_at=timezone.now(),
+        )
+
+        hermes = get_hermes_service()
+        try:
+            started = hermes.start_run(
+                input_text=task,
+                instructions=build_scout_instructions(soul_content),
+                session_id=session.hermes_session_id,
+            )
+            hermes_run_id = started["run_id"]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Hermes start_run (scout) failed: %s", exc)
+            run.status = AgentRunStatus.FAILED
+            run.error = str(exc)
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "error", "completed_at", "updated_at"])
+            return Response(
+                {"error": "Could not reach the agent runtime."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        run.hermes_run_id = hermes_run_id
+        run.save(update_fields=["hermes_run_id", "updated_at"])
+
+        # Scout runs are long, so poll Hermes to completion and persist the
+        # results here. A normal view runs to completion server-side even if the
+        # client disconnects, so finalisation is reliable. (Production should move
+        # this to a background worker — django-rq — per the §4 "runs are long" note.)
+        info = None
+        deadline = time.monotonic() + 240
+        while time.monotonic() < deadline:
+            try:
+                info = hermes.get_run(hermes_run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Hermes poll failed for run %s: %s", run.id, exc)
+                break
+            if info.get("status") in ("completed", "failed"):
+                break
+            time.sleep(3)
+
+        if not info or info.get("status") != "completed":
+            run.status = AgentRunStatus.FAILED
+            run.error = (info or {}).get("status") or "timed out"
+            run.completed_at = timezone.now()
+            run.save(update_fields=["status", "error", "completed_at", "updated_at"])
+            return Response(
+                {"error": "Scout did not finish in time.", "runId": run.id},
+                status=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
+
+        # Log tool calls (provenance) — best-effort replay of the event stream.
+        try:
+            for event in hermes.stream_events(hermes_run_id):
+                if event.get("event") == "tool.completed":
+                    duration = event.get("duration")
+                    ResearchAgentToolCall.objects.create(
+                        run=run,
+                        tool=event.get("tool", ""),
+                        arguments={"query": task},
+                        status=(
+                            AgentToolCallStatus.ERROR
+                            if event.get("error")
+                            else AgentToolCallStatus.SUCCESS
+                        ),
+                        duration_ms=int(duration * 1000) if duration else None,
+                        error=event.get("error") or "",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not read scout tool events for %s: %s", run.id, exc)
+
+        now = timezone.now()
+        staged = 0
+        for item in parse_staging_items(info.get("output", "")):
+            year = item.get("year")
+            confidence = item.get("confidence")
+            try:
+                ResearchStagingItem.objects.create(
+                    project=project,
+                    run=run,
+                    title=str(item.get("title") or "")[:512],
+                    authors=str(item.get("authors") or "")[:512],
+                    year=year if isinstance(year, int) else None,
+                    venue=str(item.get("venue") or "")[:255],
+                    doi=str(item.get("doi") or "")[:255],
+                    url=str(item.get("url") or "")[:1024],
+                    rationale=str(item.get("rationale") or ""),
+                    confidence=(
+                        float(confidence)
+                        if isinstance(confidence, (int, float))
+                        else None
+                    ),
+                    confidence_rationale=str(item.get("confidenceRationale") or ""),
+                    evidence_label=str(item.get("evidenceLabel") or "")[:32],
+                    citation_context=str(item.get("citationContext") or ""),
+                    status=StagingItemStatus.STAGED,
+                    provenance={
+                        "tool": "web",
+                        "query": task,
+                        "retrievedAt": now.isoformat(),
+                        "soulFileId": soul.id if soul else None,
+                        "soulFileVersion": version.version if version else None,
+                        "role": "scout",
+                        "runId": run.id,
+                    },
+                )
+                staged += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Scout staging item create failed: %s", exc)
+
+        run.status = AgentRunStatus.COMPLETED
+        run.completed_at = now
+        run.save(update_fields=["status", "completed_at", "updated_at"])
+        session.last_run_at = now
+        session.save(update_fields=["last_run_at", "updated_at"])
+        return Response({"runId": run.id, "stagedCount": staged})
+
+
+class ResearchStagingItemReviewView(APIView):
+    """
+    Scholar review of a staged candidate.
+
+    POST /api/research/staging-items/{id}/review/  body {decision, reason?}
+    - approve -> promote to a ResearchKnowledgeItem (the durability gate)
+    - reject  -> status rejected (+ reason)
+    - later   -> status later   (+ reason)
+    """
+
+    permission_classes = [IsAuthenticated, IsResearcherOrAbove]
+
+    def post(self, request, item_id):
+        item = get_object_or_404(
+            ResearchStagingItem.active_objects,
+            id=item_id,
+            project__user=request.user,
+        )
+        decision = (request.data.get("decision") or "").strip()
+        reason = (request.data.get("reason") or "").strip()
+
+        if decision == "approve":
+            ResearchKnowledgeItem.objects.create(
+                project=item.project,
+                source_staging_item=item,
+                approved_by=request.user,
+                approved_at=timezone.now(),
+                content=item.content or item.rationale,
+                rationale=item.rationale,
+                provenance=item.provenance,
+                soul_file_version=str(
+                    (item.provenance or {}).get("soulFileVersion") or ""
+                ),
+            )
+            item.status = StagingItemStatus.APPROVED
+            item.save(update_fields=["status", "updated_at"])
+        elif decision == "reject":
+            item.status = StagingItemStatus.REJECTED
+            item.rejection_reason = reason
+            item.save(update_fields=["status", "rejection_reason", "updated_at"])
+        elif decision == "later":
+            item.status = StagingItemStatus.LATER
+            item.later_reason = reason
+            item.save(update_fields=["status", "later_reason", "updated_at"])
+        else:
+            return Response(
+                {"error": "decision must be one of: approve, reject, later."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(ResearchStagingItemSerializer(item).data)

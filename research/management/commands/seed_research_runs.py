@@ -11,11 +11,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from research.constants import (
-    AgentRunStatus,
-    AgentToolCallStatus,
-    ResearchSessionMode,
-)
+from research.constants import AgentRunStatus, AgentToolCallStatus, ResearchSessionMode
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
@@ -98,7 +94,9 @@ class Command(BaseCommand):
         ResearchAgentToolCall.objects.create(
             run=run2,
             tool="scite",
-            arguments={"query": "tax rate causal growth Nordic — supporting vs disputing"},
+            arguments={
+                "query": "tax rate causal growth Nordic — supporting vs disputing"
+            },
             status=AgentToolCallStatus.SUCCESS,
             duration_ms=2200,
         )
@@ -118,7 +116,9 @@ class Command(BaseCommand):
         ResearchAgentToolCall.objects.create(
             run=run3,
             tool="consensus",
-            arguments={"query": "social trust universal services intergenerational mobility"},
+            arguments={
+                "query": "social trust universal services intergenerational mobility"
+            },
             status=AgentToolCallStatus.SUCCESS,
             duration_ms=1600,
         )

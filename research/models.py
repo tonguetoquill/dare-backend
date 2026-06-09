@@ -149,22 +149,26 @@ class ResearchSession(BaseModel):
         return f"{self.project_id} · {self.mode}"
 
     @classmethod
-    def get_or_create_chat_session(cls, project, user):
-        """
-        Return the project's one persistent chat session, creating it (with a
-        stable, DARE-owned hermes_session_id) on first use.
-        """
-        session = cls.active_objects.filter(
-            project=project, mode=ResearchSessionMode.CHAT
-        ).first()
+    def _get_or_create(cls, project, user, mode):
+        session = cls.active_objects.filter(project=project, mode=mode).first()
         if session:
             return session
         return cls.objects.create(
             project=project,
             user=user,
-            mode=ResearchSessionMode.CHAT,
-            hermes_session_id=f"dare-proj{project.id}-chat",
+            mode=mode,
+            hermes_session_id=f"dare-proj{project.id}-{mode}",
         )
+
+    @classmethod
+    def get_or_create_chat_session(cls, project, user):
+        """The project's one persistent chat session (stable hermes_session_id)."""
+        return cls._get_or_create(project, user, ResearchSessionMode.CHAT)
+
+    @classmethod
+    def get_or_create_scout_session(cls, project, user):
+        """The project's one persistent scout session (stable hermes_session_id)."""
+        return cls._get_or_create(project, user, ResearchSessionMode.SCOUT)
 
 
 class ResearchAgentRun(BaseModel):
