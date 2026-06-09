@@ -5,6 +5,7 @@ from research.models import (
     ResearchAgentToolCall,
     ResearchProject,
     ResearchSession,
+    ResearchSource,
 )
 
 
@@ -42,3 +43,11 @@ class ResearchAgentToolCallAdmin(admin.ModelAdmin):
     list_display = ("id", "run", "tool", "status", "duration_ms", "created_at")
     list_filter = ("status", "tool")
     raw_id_fields = ("run",)
+
+
+@admin.register(ResearchSource)
+class ResearchSourceAdmin(admin.ModelAdmin):
+    list_display = ("id", "project", "name", "kind", "source_type", "created_at")
+    list_filter = ("source_type",)
+    search_fields = ("name", "title", "authors")
+    raw_id_fields = ("project", "added_by")

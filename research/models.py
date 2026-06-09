@@ -20,6 +20,7 @@ from research.constants import (
     ResearchProjectStatus,
     ResearchSessionMode,
     ResearchSessionStatus,
+    SourceType,
 )
 
 
@@ -295,3 +296,73 @@ class ResearchAgentToolCall(BaseModel):
 
     def __str__(self):
         return f"{self.tool} · {self.status}"
+
+
+class ResearchSource(BaseModel):
+    """
+    A source in the project's library — an uploaded file or a discovered record.
+
+    Uploaded files store display metadata (name/kind/size) for now; actual file
+    storage and processing are deferred. Discovered records (from Scout, later)
+    carry the bibliographic fields.
+    """
+
+    project = models.ForeignKey(
+        ResearchProject,
+        on_delete=models.CASCADE,
+        related_name="sources",
+        help_text="Project this source belongs to.",
+    )
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="research_sources",
+        help_text="Who added this source (null if added by an agent).",
+    )
+    name = models.CharField(
+        max_length=512,
+        help_text="Display name (file name or source title).",
+    )
+    kind = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Display kind, e.g. 'PDF', 'Book chapter', 'Report'.",
+    )
+    size_label = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Human-readable file size, e.g. '2.3 MB' (for uploads).",
+    )
+    page_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Number of pages, when known.",
+    )
+    source_type = models.CharField(
+        max_length=32,
+        blank=True,
+        default=SourceType.UPLOAD,
+        help_text="Kind of source (free-form): upload/paper/book/article/other.",
+    )
+    title = models.CharField(max_length=512, blank=True, default="")
+    authors = models.CharField(max_length=512, blank=True, default="")
+    year = models.PositiveIntegerField(null=True, blank=True)
+    venue = models.CharField(max_length=255, blank=True, default="")
+    doi = models.CharField(max_length=255, blank=True, default="")
+    url = models.CharField(max_length=1024, blank=True, default="")
+    abstract = models.TextField(blank=True, default="")
+
+    objects = models.Manager()
+    active_objects = ActiveObjectsManager()
+
+    class Meta:
+        verbose_name = "Research Source"
+        verbose_name_plural = "Research Sources"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.project_id})"

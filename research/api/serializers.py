@@ -9,10 +9,12 @@ renderer emits exactly the camelCase shape the frontend expects
 
 from rest_framework import serializers
 
+from research.constants import SourceType
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
     ResearchProject,
+    ResearchSource,
 )
 
 
@@ -22,6 +24,13 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
     pending_review_count = serializers.SerializerMethodField()
     approved_count = serializers.SerializerMethodField()
     source_count = serializers.SerializerMethodField()
+    # Write-only: file metadata from the create wizard, persisted as sources.
+    sources = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        write_only=True,
+        help_text="Optional source files to attach on create.",
+    )
 
     class Meta:
         model = ResearchProject
@@ -36,6 +45,7 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
             "pending_review_count",
             "approved_count",
             "source_count",
+            "sources",
             "created_at",
             "updated_at",
         ]
@@ -58,8 +68,44 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
         return 0
 
     def get_source_count(self, obj):
-        # Wired to the source library in a later increment.
-        return 0
+        return ResearchSource.active_objects.filter(project=obj).count()
+
+    def create(self, validated_data):
+        source_files = validated_data.pop("sources", [])
+        project = super().create(validated_data)
+        for item in source_files:
+            ResearchSource.objects.create(
+                project=project,
+                added_by=project.user,
+                name=item.get("name", ""),
+                kind=item.get("kind", ""),
+                size_label=item.get("size_label", ""),
+                source_type=SourceType.UPLOAD,
+            )
+        return project
+
+
+class ResearchSourceSerializer(serializers.ModelSerializer):
+    """A source in the project's library."""
+
+    class Meta:
+        model = ResearchSource
+        fields = [
+            "id",
+            "name",
+            "kind",
+            "size_label",
+            "page_count",
+            "source_type",
+            "title",
+            "authors",
+            "year",
+            "venue",
+            "doi",
+            "url",
+            "created_at",
+        ]
+        read_only_fields = fields
 
 
 class ResearchAgentToolCallSerializer(serializers.ModelSerializer):
@@ -130,6 +176,7 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
     """
 
     runs = serializers.SerializerMethodField()
+    sources = serializers.SerializerMethodField()
 
     class Meta(ResearchProjectSerializer.Meta):
         fields = ResearchProjectSerializer.Meta.fields + ["runs"]
@@ -139,3 +186,9 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
             "-created_at"
         )
         return ResearchAgentRunSerializer(runs, many=True).data
+
+    def get_sources(self, obj):
+        sources = ResearchSource.active_objects.filter(project=obj).order_by(
+            "-created_at"
+        )
+        return ResearchSourceSerializer(sources, many=True).data

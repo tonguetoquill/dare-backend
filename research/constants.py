@@ -110,3 +110,23 @@ class AgentToolCallStatus:
             (cls.SUCCESS, "Success"),
             (cls.ERROR, "Error"),
         ]
+
+
+class SourceType:
+    """Kind of source record (free-form; the canonical set for the UI/docs)."""
+
+    UPLOAD = "upload"
+    PAPER = "paper"
+    BOOK = "book"
+    ARTICLE = "article"
+    OTHER = "other"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.UPLOAD, "Upload"),
+            (cls.PAPER, "Paper"),
+            (cls.BOOK, "Book"),
+            (cls.ARTICLE, "Article"),
+            (cls.OTHER, "Other"),
+        ]
