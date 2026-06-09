@@ -63,6 +63,33 @@ def _result_text(result):
     return str(result)
 
 
+# Common names for a tool's free-text search parameter, in preference order.
+_QUERY_PARAM_NAMES = ("query", "term", "q", "search", "keywords", "question")
+
+
+def _query_param(tool):
+    """
+    Pick the parameter of `tool` that takes the free-text search query, from its
+    input schema. Tools name it differently (Consensus `query`, Scite `term`);
+    sending the wrong name silently degrades to an unfiltered search. Returns
+    None when the tool has no string parameter to carry a query at all.
+    """
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+    props = schema.get("properties") or {}
+    string_props = [
+        name
+        for name, spec in props.items()
+        if isinstance(spec, dict) and spec.get("type") == "string"
+    ]
+    for name in _QUERY_PARAM_NAMES:
+        if name in string_props:
+            return name
+    for name in schema.get("required") or []:
+        if name in string_props:
+            return name
+    return string_props[0] if string_props else None
+
+
 def gather_tool_context(user, slugs, query, per_tool_chars=4000):
     """
     Run the primary tool of each of the user's connected servers whose slug is in
@@ -83,12 +110,21 @@ def gather_tool_context(user, slugs, query, per_tool_chars=4000):
         if slug.lower() not in wanted:
             continue
         tools = conn.cached_tools or []
-        tool_name = tools[0].get("name") if tools else None
+        tool = tools[0] if tools else None
+        tool_name = tool.get("name") if tool else None
         if not tool_name:
+            continue
+        param = _query_param(tool)
+        if not param:
+            logger.warning(
+                "gather_tool_context: %s.%s has no string param for a query; skipped",
+                slug,
+                tool_name,
+            )
             continue
         try:
             result = async_to_sync(mcp_tool_executor.execute_tool_call)(
-                user, slug, tool_name, {"query": query}
+                user, slug, tool_name, {param: query}
             )
         except Exception as exc:  # noqa: BLE001 - best-effort
             logger.warning("gather_tool_context %s.%s failed: %s", slug, tool_name, exc)
