@@ -104,12 +104,17 @@ class MCPManager:
         logger.info(f"Discovering tools for {server.slug}")
         tools = await self._discover_tools(server, credentials)
 
-        # Cache in Redis
-        try:
-            self.redis.setex(cache_key, TOOL_CACHE_TTL, json.dumps(tools))
-            logger.debug(f"Cached {len(tools)} tools for {server.slug}")
-        except redis.RedisError as e:
-            logger.warning(f"Redis error caching tools: {e}")
+        # Cache in Redis. Never cache an empty list: a remote that answers
+        # mid-warmup with no tools would otherwise pin "no tools" for the
+        # whole TTL and make reconnect attempts look broken until it expires.
+        if tools:
+            try:
+                self.redis.setex(cache_key, TOOL_CACHE_TTL, json.dumps(tools))
+                logger.debug(f"Cached {len(tools)} tools for {server.slug}")
+            except redis.RedisError as e:
+                logger.warning(f"Redis error caching tools: {e}")
+        else:
+            logger.warning(f"Tool discovery for {server.slug} returned no tools; not caching")
 
         return tools
 
@@ -227,14 +232,26 @@ class MCPManager:
     async def _discover_tools(self, server, credentials: dict) -> list[dict]:
         """
         Discover tools by spawning subprocess and calling tools/list.
-        """
-        client = await self._build_client(server, credentials)
 
-        try:
-            tools = await client.list_tools()
-            return tools
-        finally:
-            await client.close()
+        Retries transient client failures (timeouts, cold remote, brief network
+        flaps) with a short backoff — a single-attempt discovery is what made
+        first-time connects intermittently fail until the user reconnected.
+        """
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            client = await self._build_client(server, credentials)
+            try:
+                return await client.list_tools()
+            except MCPClientError as e:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    f"Tool discovery for {server.slug} failed "
+                    f"(attempt {attempt}/{attempts}): {e}; retrying"
+                )
+                await asyncio.sleep(attempt)
+            finally:
+                await client.close()
 
     async def _build_client(self, server, credentials: dict):
         """Build a transport-specific MCP client for this server."""
