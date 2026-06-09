@@ -47,6 +47,58 @@ def list_user_tools(user):
     return tools
 
 
+def _result_text(result):
+    """Flatten an MCP tool result into plain text (content blocks or JSON)."""
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, list):
+            parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("text")
+            ]
+            if parts:
+                return "\n".join(parts)
+        return json.dumps(result)
+    return str(result)
+
+
+def gather_tool_context(user, slugs, query, per_tool_chars=4000):
+    """
+    Run the primary tool of each of the user's connected servers whose slug is in
+    `slugs`, with {query}, and return a text block of the results — so a delegated
+    run (Scout) can draw on credentialed tools (Consensus, …) that DARE executes
+    on its behalf. Synchronous (for jobs); best-effort, failures are skipped.
+    Credentials and audit stay in DARE (calls go through the executor).
+    """
+    wanted = {s.lower() for s in (slugs or [])}
+    if not wanted:
+        return ""
+    connections = UserMCPConnection.all_objects.filter(
+        user=user, is_active=True, is_deleted=False
+    ).select_related("server")
+    blocks = []
+    for conn in connections:
+        slug = conn.server.slug
+        if slug.lower() not in wanted:
+            continue
+        tools = conn.cached_tools or []
+        tool_name = tools[0].get("name") if tools else None
+        if not tool_name:
+            continue
+        try:
+            result = async_to_sync(mcp_tool_executor.execute_tool_call)(
+                user, slug, tool_name, {"query": query}
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.warning("gather_tool_context %s.%s failed: %s", slug, tool_name, exc)
+            continue
+        text = _result_text(result).strip()
+        if text:
+            blocks.append(f"### {slug} · {tool_name}\n{text[:per_tool_chars]}")
+    return "\n\n".join(blocks)
+
+
 def _result(rpc_id, result):
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 

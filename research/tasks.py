@@ -34,6 +34,7 @@ from research.services import (
     parse_critic_verdict,
     parse_staging_items,
 )
+from mcp.services.mcp_gateway import gather_tool_context
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,29 @@ def run_scout_job(run_id):
     hermes = get_hermes_service()
     hermes.provision_soul(soul_content)
 
+    # DARE executes the scholar's connected research MCP tools (Consensus, …) and
+    # feeds the credentialed results into the Scout run. Creds + audit stay in
+    # DARE; Hermes structures these alongside its own web_search into staging.
+    _set_status(run, "Querying research tools…")
+    scout_input = task
+    try:
+        mcp_context = gather_tool_context(run.user, project.enabled_tools, task)
+    except Exception as exc:  # noqa: BLE001 - non-fatal
+        logger.warning("Scout MCP context gather failed: %s", exc)
+        mcp_context = ""
+    if mcp_context:
+        scout_input = (
+            f"{task}\n\n"
+            "Below are credentialed results from the scholar's connected research "
+            "tools. Evaluate them against the standards and include the relevant "
+            "ones in your staging items (cite them), alongside what you find via "
+            f"web_search:\n\n{mcp_context}"
+        )
+
     _set_status(run, "Starting Scout…")
     try:
         started = hermes.start_run(
-            input_text=task,
+            input_text=scout_input,
             instructions=build_scout_instructions(soul_content),
             session_id=run.session.hermes_session_id,
         )
