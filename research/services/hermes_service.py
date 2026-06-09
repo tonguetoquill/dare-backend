@@ -1,0 +1,96 @@
+"""
+Thin client for the Hermes agent gateway — the DARE-owned adapter boundary.
+
+Hermes is driven over REST: `POST /v1/runs` starts an async run (the soul rides
+in `instructions`, continuity via `session_id`), and `GET /v1/runs/{id}/events`
+streams the reply as SSE (`message.delta`) plus tool-call provenance. DARE never
+gives Hermes DB access; this is the only place DARE talks to Hermes.
+"""
+
+import json
+import logging
+
+import requests
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+
+class HermesService:
+    """REST client for the Hermes gateway (drive + SSE stream)."""
+
+    def __init__(self):
+        self.base_url = settings.HERMES_GATEWAY_URL.rstrip("/")
+        self.api_key = settings.HERMES_API_KEY
+
+    def _headers(self, *, json_body=False):
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
+
+    def start_run(self, *, input_text, instructions, session_id, timeout=30):
+        """
+        Start an async run. The soul-file content rides in `instructions`;
+        `session_id` gives persistent cross-run memory. Returns the gateway JSON
+        (``{"run_id": ..., "status": "started"}``).
+        """
+        resp = requests.post(
+            f"{self.base_url}/v1/runs",
+            headers=self._headers(json_body=True),
+            json={
+                "input": input_text,
+                "instructions": instructions,
+                "session_id": session_id,
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def stream_events(self, hermes_run_id, timeout=300):
+        """
+        Stream a run's SSE events as parsed dicts. Each event carries an
+        ``event`` key: ``message.delta`` (``delta`` token), ``tool.started`` /
+        ``tool.completed``, ``run.completed``, etc.
+        """
+        with requests.get(
+            f"{self.base_url}/v1/runs/{hermes_run_id}/events",
+            headers=self._headers(),
+            stream=True,
+            timeout=timeout,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if not payload:
+                    continue
+                try:
+                    yield json.loads(payload)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Hermes SSE: could not parse event line: %s", payload[:200]
+                    )
+
+    def get_run(self, hermes_run_id, timeout=30):
+        """Poll a run's status/result (``{status, output, usage, model, ...}``)."""
+        resp = requests.get(
+            f"{self.base_url}/v1/runs/{hermes_run_id}",
+            headers=self._headers(),
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+_hermes_service = None
+
+
+def get_hermes_service():
+    """Return the shared HermesService instance."""
+    global _hermes_service
+    if _hermes_service is None:
+        _hermes_service = HermesService()
+    return _hermes_service

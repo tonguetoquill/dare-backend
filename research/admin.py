@@ -3,6 +3,7 @@ from django.contrib import admin
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
+    ResearchChatMessage,
     ResearchMemoryProposal,
     ResearchProject,
     ResearchProjectMemory,
@@ -89,3 +90,10 @@ class ResearchMemoryProposalAdmin(admin.ModelAdmin):
     list_display = ("id", "project", "proposed_by_role", "status", "created_at")
     list_filter = ("status", "memory_type")
     raw_id_fields = ("project", "run", "accepted_by")
+
+
+@admin.register(ResearchChatMessage)
+class ResearchChatMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "project", "session", "role", "created_at")
+    list_filter = ("role",)
+    raw_id_fields = ("session", "project", "user", "run")

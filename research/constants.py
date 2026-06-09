@@ -218,3 +218,17 @@ class MemoryProposalStatus:
             (cls.ACCEPTED, "Accepted"),
             (cls.REJECTED, "Rejected"),
         ]
+
+
+class ChatMessageRole:
+    """Author of a chat message (DARE-owned, enforced)."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.USER, "User"),
+            (cls.ASSISTANT, "Assistant"),
+        ]

@@ -17,6 +17,7 @@ from common.models import BaseModel
 from research.constants import (
     AgentRunStatus,
     AgentToolCallStatus,
+    ChatMessageRole,
     MemoryProposalStatus,
     MemoryType,
     ProjectMemorySource,
@@ -144,6 +145,24 @@ class ResearchSession(BaseModel):
 
     def __str__(self):
         return f"{self.project_id} · {self.mode}"
+
+    @classmethod
+    def get_or_create_chat_session(cls, project, user):
+        """
+        Return the project's one persistent chat session, creating it (with a
+        stable, DARE-owned hermes_session_id) on first use.
+        """
+        session = cls.active_objects.filter(
+            project=project, mode=ResearchSessionMode.CHAT
+        ).first()
+        if session:
+            return session
+        return cls.objects.create(
+            project=project,
+            user=user,
+            mode=ResearchSessionMode.CHAT,
+            hermes_session_id=f"dare-proj{project.id}-chat",
+        )
 
 
 class ResearchAgentRun(BaseModel):
@@ -573,3 +592,58 @@ class ResearchMemoryProposal(BaseModel):
 
     def __str__(self):
         return f"{self.proposed_by_role or 'agent'} proposal ({self.project_id})"
+
+
+class ResearchChatMessage(BaseModel):
+    """
+    One message in a project's hands-on chat (the durable transcript). Hermes
+    keeps the session memory; DARE keeps the visible record.
+    """
+
+    session = models.ForeignKey(
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+        help_text="Chat session this message belongs to.",
+    )
+    project = models.ForeignKey(
+        ResearchProject,
+        on_delete=models.CASCADE,
+        related_name="chat_messages",
+        help_text="Project this message belongs to (denormalised).",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="research_chat_messages",
+        help_text="The scholar whose chat this is.",
+    )
+    run = models.ForeignKey(
+        ResearchAgentRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="chat_messages",
+        help_text="The run that produced this message (assistant turns).",
+    )
+    role = models.CharField(
+        max_length=16,
+        choices=ChatMessageRole.choices(),
+        help_text="Author of the message: user or assistant.",
+    )
+    content = models.TextField(
+        blank=True,
+        default="",
+        help_text="The message text.",
+    )
+
+    objects = models.Manager()
+    active_objects = ActiveObjectsManager()
+
+    class Meta:
+        verbose_name = "Research Chat Message"
+        verbose_name_plural = "Research Chat Messages"
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.role} ({self.session_id})"

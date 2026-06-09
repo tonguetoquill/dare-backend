@@ -375,3 +375,7 @@ SYFTBOX = {
     'DATASITES_ROOT': env.SYFTBOX_DATASITES_ROOT,
     'APP_NAME': env.SYFTBOX_APP_NAME,
 }
+
+# Hermes agent runtime (delegated research-agent runtime for Research Mode)
+HERMES_GATEWAY_URL = env.HERMES_GATEWAY_URL
+HERMES_API_KEY = env.HERMES_API_KEY

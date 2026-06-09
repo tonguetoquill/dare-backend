@@ -73,6 +73,10 @@ WEAVIATE_AUTOSCHEMA_ENABLED = os.getenv("WEAVIATE_AUTOSCHEMA_ENABLED", "False") 
 # MCP Docker Configuration
 MCP_USE_DOCKER = os.getenv("MCP_USE_DOCKER", "False") == "True"
 
+# Hermes agent runtime (delegated research-agent runtime for Research Mode)
+HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://127.0.0.1:8642")
+HERMES_API_KEY = os.getenv("HERMES_API_KEY", "dev-spike-local")
+
 # Database toggle for local development
 # Set to True to use PostgreSQL (same as staging/prod), False for SQLite
 USE_POSTGRES = os.getenv("USE_POSTGRES", "False").lower() in ("true", "1", "yes")

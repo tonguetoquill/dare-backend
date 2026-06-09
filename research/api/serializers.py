@@ -17,6 +17,7 @@ from research.constants import (
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
+    ResearchChatMessage,
     ResearchMemoryProposal,
     ResearchProject,
     ResearchProjectMemory,
@@ -204,6 +205,15 @@ class ResearchMemoryProposalSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResearchMemoryProposal
         fields = ["id", "role", "content", "memory_type", "status", "proposed_at"]
+        read_only_fields = fields
+
+
+class ResearchChatMessageSerializer(serializers.ModelSerializer):
+    """One message in a project's chat transcript."""
+
+    class Meta:
+        model = ResearchChatMessage
+        fields = ["id", "role", "content", "created_at"]
         read_only_fields = fields
 
 
