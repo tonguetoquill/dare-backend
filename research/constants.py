@@ -41,3 +41,72 @@ class StandardsTemplate:
             (cls.EMPIRICAL_RIGOR, "Empirical Rigor"),
             (cls.CUSTOM, "Custom"),
         ]
+
+
+class ResearchSessionMode:
+    """
+    The two delegation modes (DARE-owned, enforced). Each maps 1:1 to a Hermes
+    session: a persistent 'scout' session and a persistent 'chat' session per
+    project.
+    """
+
+    SCOUT = "scout"
+    CHAT = "chat"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.SCOUT, "Scout"),
+            (cls.CHAT, "Chat"),
+        ]
+
+
+class ResearchSessionStatus:
+    """Session lifecycle (DARE-owned, enforced)."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.ACTIVE, "Active"),
+            (cls.ARCHIVED, "Archived"),
+        ]
+
+
+class AgentRunStatus:
+    """
+    Run lifecycle. Produced/advanced by Hermes, so stored free-form (NOT enforced
+    at the DB level); this is the canonical set for the UI/docs.
+    """
+
+    STARTED = "started"
+    RUNNING = "running"
+    QUEUED = "queued"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.STARTED, "Started"),
+            (cls.RUNNING, "Running"),
+            (cls.QUEUED, "Queued"),
+            (cls.COMPLETED, "Completed"),
+            (cls.FAILED, "Failed"),
+        ]
+
+
+class AgentToolCallStatus:
+    """Outcome of a single tool call (recorded; stored free-form)."""
+
+    SUCCESS = "success"
+    ERROR = "error"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.SUCCESS, "Success"),
+            (cls.ERROR, "Error"),
+        ]
