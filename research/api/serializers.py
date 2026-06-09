@@ -56,3 +56,17 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
     def get_source_count(self, obj):
         # Wired to the source library in a later increment.
         return 0
+
+
+class ResearchProjectDetailSerializer(ResearchProjectSerializer):
+    """
+    Single-project payload for the workspace (GET /api/research/projects/{id}/).
+
+    This is the aggregation point for the whole workspace: today it returns the
+    same fields as the list serializer, and it will grow to nest the active soul
+    file, sources, staging/review items, agent runs and memory as those models
+    land — so the frontend can load everything the workspace needs from one call.
+    """
+
+    class Meta(ResearchProjectSerializer.Meta):
+        pass
