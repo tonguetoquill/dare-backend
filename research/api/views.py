@@ -34,6 +34,7 @@ from research.constants import (
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
+    ResearchArtifact,
     ResearchChatMessage,
     ResearchKnowledgeItem,
     ResearchProject,
@@ -42,7 +43,7 @@ from research.models import (
     SoulFile,
     SoulFileVersion,
 )
-from research.services import get_hermes_service
+from research.services import extract_artifacts, get_hermes_service
 from research.tasks import run_critic_job, run_scout_job
 
 logger = logging.getLogger(__name__)
@@ -239,14 +240,27 @@ class ResearchChatView(APIView):
                 )
                 return
 
+            full_reply = "".join(chunks)
             assistant_message = ResearchChatMessage.objects.create(
                 session=session,
                 project=project,
                 user=request.user,
                 role=ChatMessageRole.ASSISTANT,
-                content="".join(chunks),
+                content=full_reply,
                 run=run,
             )
+            # Promote any renderable fenced blocks (mermaid/html/svg/excalidraw)
+            # the agent produced into durable, typed artifacts.
+            for art in extract_artifacts(full_reply):
+                ResearchArtifact.objects.create(
+                    project=project,
+                    run=run,
+                    artifact_type=art["artifact_type"],
+                    title=art["title"],
+                    content=art["content"],
+                    source="hermes",
+                    provenance={"runId": run.id, "messageId": assistant_message.id},
+                )
             run.status = AgentRunStatus.COMPLETED
             run.completed_at = timezone.now()
             run.save(update_fields=["status", "completed_at", "updated_at"])

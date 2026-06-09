@@ -18,6 +18,7 @@ from research.constants import (
 from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
+    ResearchArtifact,
     ResearchChatMessage,
     ResearchKnowledgeItem,
     ResearchMemoryProposal,
@@ -322,6 +323,23 @@ class ResearchKnowledgeItemSerializer(serializers.ModelSerializer):
         return s.citation_context if s else ""
 
 
+class ResearchArtifactSerializer(serializers.ModelSerializer):
+    """A renderable artifact — artifactType drives the FE renderer registry."""
+
+    class Meta:
+        model = ResearchArtifact
+        fields = [
+            "id",
+            "artifact_type",
+            "title",
+            "content",
+            "source",
+            "provenance",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
 class ResearchProjectDetailSerializer(ResearchProjectSerializer):
     """
     Single-project payload for the workspace (GET /api/research/projects/{id}/).
@@ -339,6 +357,7 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
     memory_proposals = serializers.SerializerMethodField()
     review_items = serializers.SerializerMethodField()
     knowledge_items = serializers.SerializerMethodField()
+    artifacts = serializers.SerializerMethodField()
 
     class Meta(ResearchProjectSerializer.Meta):
         fields = ResearchProjectSerializer.Meta.fields + [
@@ -348,6 +367,7 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
             "memory_proposals",
             "review_items",
             "knowledge_items",
+            "artifacts",
         ]
 
     def get_runs(self, obj):
@@ -400,3 +420,9 @@ class ResearchProjectDetailSerializer(ResearchProjectSerializer):
             "-created_at"
         )
         return ResearchKnowledgeItemSerializer(items, many=True).data
+
+    def get_artifacts(self, obj):
+        items = ResearchArtifact.active_objects.filter(project=obj).order_by(
+            "-created_at"
+        )
+        return ResearchArtifactSerializer(items, many=True).data

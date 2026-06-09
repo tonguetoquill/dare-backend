@@ -806,3 +806,54 @@ class ResearchKnowledgeItem(BaseModel):
 
     def __str__(self):
         return f"knowledge ({self.project_id})"
+
+
+class ResearchArtifact(BaseModel):
+    """
+    A renderable artifact produced for a project (diagram, HTML, SVG, Excalidraw,
+    …). Mirrors DARE's Artifact contract: `artifact_type` drives the frontend
+    renderer; `content` is the raw payload (Mermaid/SVG/HTML text or scene JSON).
+    Detected from agent replies today; DARE's own tools can write them too.
+    """
+
+    project = models.ForeignKey(
+        ResearchProject,
+        on_delete=models.CASCADE,
+        related_name="artifacts",
+        help_text="Project this artifact belongs to.",
+    )
+    run = models.ForeignKey(
+        ResearchAgentRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="artifacts",
+        help_text="Run that produced this artifact, if any.",
+    )
+    artifact_type = models.CharField(
+        max_length=32,
+        help_text="Renderer key: diagram | html | svg | excalidraw | … (free-form).",
+    )
+    title = models.CharField(max_length=255, blank=True, default="")
+    content = models.TextField(
+        blank=True,
+        default="",
+        help_text="Raw artifact payload (mermaid/svg/html text, or scene JSON).",
+    )
+    source = models.CharField(
+        max_length=32,
+        default="hermes",
+        help_text="Who produced it: 'hermes' or 'dare'.",
+    )
+    provenance = models.JSONField(default=dict, blank=True)
+
+    objects = models.Manager()
+    active_objects = ActiveObjectsManager()
+
+    class Meta:
+        verbose_name = "Research Artifact"
+        verbose_name_plural = "Research Artifacts"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.artifact_type} artifact ({self.project_id})"
