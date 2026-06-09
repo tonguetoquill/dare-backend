@@ -4,11 +4,13 @@ from research.models import (
     ResearchAgentRun,
     ResearchAgentToolCall,
     ResearchChatMessage,
+    ResearchKnowledgeItem,
     ResearchMemoryProposal,
     ResearchProject,
     ResearchProjectMemory,
     ResearchSession,
     ResearchSource,
+    ResearchStagingItem,
     SoulFile,
     SoulFileVersion,
 )
@@ -97,3 +99,17 @@ class ResearchChatMessageAdmin(admin.ModelAdmin):
     list_display = ("id", "project", "session", "role", "created_at")
     list_filter = ("role",)
     raw_id_fields = ("session", "project", "user", "run")
+
+
+@admin.register(ResearchStagingItem)
+class ResearchStagingItemAdmin(admin.ModelAdmin):
+    list_display = ("id", "project", "title", "evidence_label", "status", "created_at")
+    list_filter = ("status", "evidence_label", "source_type")
+    search_fields = ("title", "authors", "rationale")
+    raw_id_fields = ("project", "run")
+
+
+@admin.register(ResearchKnowledgeItem)
+class ResearchKnowledgeItemAdmin(admin.ModelAdmin):
+    list_display = ("id", "project", "approved_by", "approved_at", "created_at")
+    raw_id_fields = ("project", "source_staging_item", "approved_by")

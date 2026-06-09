@@ -232,3 +232,50 @@ class ChatMessageRole:
             (cls.USER, "User"),
             (cls.ASSISTANT, "Assistant"),
         ]
+
+
+class StagingItemStatus:
+    """Review workflow status for a staging item (DARE-owned, enforced)."""
+
+    STAGED = "staged"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    LATER = "later"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.STAGED, "Staged"),
+            (cls.APPROVED, "Approved"),
+            (cls.REJECTED, "Rejected"),
+            (cls.LATER, "Later"),
+        ]
+
+
+class EvidenceLabel:
+    """
+    How a candidate relates to the thesis (produced by the agent; stored
+    free-form). Canonical set per the §11 contract.
+    """
+
+    SUPPORTING = "supporting"
+    DISPUTING = "disputing"
+    PARTIAL = "partial"
+    TANGENTIAL = "tangential"
+    UNVERIFIABLE = "unverifiable"
+
+    @classmethod
+    def choices(cls):
+        return [
+            (cls.SUPPORTING, "Supporting"),
+            (cls.DISPUTING, "Disputing"),
+            (cls.PARTIAL, "Partial"),
+            (cls.TANGENTIAL, "Tangential"),
+            (cls.UNVERIFIABLE, "Unverifiable"),
+        ]
+
+
+class StagingSourceType:
+    """Type of staged item (free-form; the contract's default is sourceCandidate)."""
+
+    SOURCE_CANDIDATE = "sourceCandidate"

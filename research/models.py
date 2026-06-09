@@ -25,6 +25,8 @@ from research.constants import (
     ResearchSessionMode,
     ResearchSessionStatus,
     SourceType,
+    StagingItemStatus,
+    StagingSourceType,
 )
 
 
@@ -647,3 +649,150 @@ class ResearchChatMessage(BaseModel):
 
     def __str__(self):
         return f"{self.role} ({self.session_id})"
+
+
+class ResearchStagingItem(BaseModel):
+    """
+    A candidate the agent staged for review — the safe landing zone before the
+    scholar promotes it to durable knowledge. Carries the full §11 provenance so
+    every finding is auditable and tied to the soul-file version that governed it.
+    """
+
+    project = models.ForeignKey(
+        ResearchProject,
+        on_delete=models.CASCADE,
+        related_name="staging_items",
+        help_text="Project this candidate belongs to.",
+    )
+    run = models.ForeignKey(
+        ResearchAgentRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staging_items",
+        help_text="The run that produced this item, if any.",
+    )
+    source_type = models.CharField(
+        max_length=32,
+        blank=True,
+        default=StagingSourceType.SOURCE_CANDIDATE,
+        help_text="Type of staged item (free-form; default 'sourceCandidate').",
+    )
+    # Bibliographic fields (from the §11 result contract).
+    title = models.CharField(max_length=512, blank=True, default="")
+    authors = models.CharField(max_length=512, blank=True, default="")
+    year = models.PositiveIntegerField(null=True, blank=True)
+    venue = models.CharField(max_length=255, blank=True, default="")
+    doi = models.CharField(max_length=255, blank=True, default="")
+    url = models.CharField(max_length=1024, blank=True, default="")
+    abstract = models.TextField(blank=True, default="")
+    content = models.TextField(blank=True, default="")
+    # Why it matters + the agent's calibrated confidence.
+    rationale = models.TextField(blank=True, default="")
+    confidence = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Agent's relevance confidence, 0.0–1.0.",
+    )
+    confidence_rationale = models.TextField(blank=True, default="")
+    evidence_label = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="supporting/disputing/partial/tangential/unverifiable (free-form).",
+    )
+    citation_context = models.TextField(blank=True, default="")
+    provenance = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="{tool, query, retrievedAt, soulFileId, soulFileVersion, role, runId}.",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=StagingItemStatus.choices(),
+        default=StagingItemStatus.STAGED,
+        help_text="Review status (DARE-owned).",
+    )
+    rejection_reason = models.TextField(blank=True, default="")
+    later_reason = models.TextField(blank=True, default="")
+    critic_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Critic pressure-test output, when 'Ask Critic' has run.",
+    )
+    review_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Free-form review annotations.",
+    )
+
+    objects = models.Manager()
+    active_objects = ActiveObjectsManager()
+
+    class Meta:
+        verbose_name = "Research Staging Item"
+        verbose_name_plural = "Research Staging Items"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title or 'staged item'} · {self.status} ({self.project_id})"
+
+
+class ResearchKnowledgeItem(BaseModel):
+    """
+    Scholar-approved durable knowledge — the permanent record, promoted from a
+    staging item. Only the scholar may create these (the durability gate).
+    """
+
+    project = models.ForeignKey(
+        ResearchProject,
+        on_delete=models.CASCADE,
+        related_name="knowledge_items",
+        help_text="Project this knowledge belongs to.",
+    )
+    source_staging_item = models.ForeignKey(
+        ResearchStagingItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="knowledge_items",
+        help_text="The staging item this was promoted from.",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="research_approved_knowledge",
+        help_text="The scholar who approved it.",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    content = models.TextField(blank=True, default="")
+    rationale = models.TextField(blank=True, default="")
+    provenance = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Provenance carried over from the staging item.",
+    )
+    soul_file_version = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Soul-file version that governed the approved item.",
+    )
+    used_in = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Sections of the project this source supports.",
+    )
+
+    objects = models.Manager()
+    active_objects = ActiveObjectsManager()
+
+    class Meta:
+        verbose_name = "Research Knowledge Item"
+        verbose_name_plural = "Research Knowledge Items"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"knowledge ({self.project_id})"
