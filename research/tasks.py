@@ -60,6 +60,20 @@ def _session_key(project):
     return f"dare-proj{project.id}"
 
 
+def _hermes_run_failed(hermes, hermes_run_id, chunks):
+    """
+    True when the run produced nothing because Hermes itself failed (e.g. the
+    brain hit a rate limit) — without this check an empty stream would be
+    reported as a successful run with no findings.
+    """
+    if chunks:
+        return False
+    try:
+        return hermes.get_run(hermes_run_id).get("status") == "failed"
+    except Exception:  # noqa: BLE001 - can't confirm; let parsing decide
+        return False
+
+
 def _reask_json(hermes, session_id, expectation):
     """
     One corrective re-ask when a structured reply wasn't parseable. Hermes's
@@ -151,10 +165,17 @@ def run_scout_job(run_id):
         )
 
     _set_status(run, "Starting Scout…")
+    # Quick runs halve the search/read budget — the main token-cost lever
+    # (each fetched page adds thousands of input tokens to the run).
+    quick = (run.selected_context or {}).get("depth") == "quick"
     try:
         started = hermes.start_run(
             input_text=scout_input,
-            instructions=build_scout_instructions(soul_content),
+            instructions=build_scout_instructions(
+                soul_content,
+                max_candidates=2 if quick else 4,
+                max_searches=2 if quick else 4,
+            ),
             session_id=run.session.hermes_session_id,
             session_key=_session_key(project),
         )
@@ -200,6 +221,10 @@ def run_scout_job(run_id):
                 break
     except Exception as exc:  # noqa: BLE001
         _fail(run, "The Scout run was interrupted.", exc)
+        return
+
+    if _hermes_run_failed(hermes, hermes_run_id, chunks):
+        _fail(run, "The agent runtime failed mid-run.", Exception("hermes run failed"))
         return
 
     _set_status(run, "Evaluating findings…")
@@ -326,6 +351,10 @@ def run_critic_job(run_id, item_id):
         _fail(run, "The Critic run was interrupted.", exc)
         return
 
+    if _hermes_run_failed(hermes, hermes_run_id, chunks):
+        _fail(run, "The agent runtime failed mid-run.", Exception("hermes run failed"))
+        return
+
     now = timezone.now()
     output = "".join(chunks)
     verdict = parse_critic_verdict(output)
@@ -403,18 +432,26 @@ def run_artifact_job(run_id):
         _fail(run, "The artifact run was interrupted.", exc)
         return
 
+    if _hermes_run_failed(hermes, hermes_run_id, chunks):
+        _fail(run, "The agent runtime failed mid-run.", Exception("hermes run failed"))
+        return
+
     now = timezone.now()
     output = "".join(chunks)
-    artifacts = parse_artifacts(output)
+    problems = []
+    artifacts = parse_artifacts(output, errors=problems)
     if not artifacts and output.strip():
         _set_status(run, "Repairing the artifact format…")
-        artifacts = parse_artifacts(
-            _reask_json(
-                hermes,
-                run.session.hermes_session_id,
-                'the {"artifacts": [{"type": ..., "title": ..., "content": ...}]} '
-                "object from your instructions",
+        expectation = (
+            'the {"artifacts": [{"type": ..., "title": ..., "content": ...}]} '
+            "object from your instructions"
+        )
+        if problems:
+            expectation += ". Fix these specific problems: " + "; ".join(
+                problems[:5]
             )
+        artifacts = parse_artifacts(
+            _reask_json(hermes, run.session.hermes_session_id, expectation)
         )
     created = 0
     for art in artifacts:

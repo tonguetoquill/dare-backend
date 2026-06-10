@@ -292,6 +292,9 @@ class ResearchScoutView(APIView):
                 {"error": "A non-empty 'task' is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # 'quick' caps the search/read budget (the token-cost lever); anything
+        # else gets the default deep run.
+        depth = "quick" if request.data.get("depth") == "quick" else "deep"
 
         session = ResearchSession.get_or_create_scout_session(project, request.user)
         soul = SoulFile.active_objects.filter(project=project).first()
@@ -309,6 +312,7 @@ class ResearchScoutView(APIView):
             status_detail="Queued…",
             soul_file_version=soul_label,
             allowed_tools=["web"],
+            selected_context={"depth": depth},
             started_at=timezone.now(),
         )
         run_scout_job.delay(run.id)

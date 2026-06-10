@@ -10,10 +10,28 @@ the frontend (markdown), but artifacts are *created* only through this path.
 import json
 import logging
 
+from dare_tools.services.pptx_tool import (
+    execute_create_pptx,
+    get_create_pptx_tool_openai,
+)
+from dare_tools.services.registry import (
+    execute_create_docx,
+    get_create_docx_tool_openai,
+)
+
 logger = logging.getLogger(__name__)
 
 # Renderable artifact types the FE registry understands.
-ALLOWED_TYPES = {"diagram", "html", "svg", "excalidraw", "code", "document"}
+ALLOWED_TYPES = {
+    "diagram",
+    "html",
+    "svg",
+    "excalidraw",
+    "code",
+    "document",
+    "docx",
+    "pptx",
+}
 
 _TYPE_BRIEF = {
     "diagram": "a Mermaid diagram (content = the mermaid source)",
@@ -22,7 +40,52 @@ _TYPE_BRIEF = {
     "excalidraw": 'an Excalidraw scene (content = the scene JSON string, {"type":"excalidraw","version":2,"elements":[…]})',
     "code": "a code snippet (content = the code)",
     "document": "a written document (content = GitHub-flavored Markdown)",
+    "docx": (
+        "a Word document (content = a JSON object "
+        '{"title": "...", "blocks": [...]} where each block is one of: '
+        '{"type": "heading", "level": 1-4, "text": "..."}, '
+        '{"type": "paragraph", "text": "...", "alignment"?: "left|center|right"}, '
+        '{"type": "list", "items": ["..."], "ordered"?: true}, '
+        '{"type": "table", "headers": ["..."], "rows": [["..."]]}, '
+        '{"type": "blockquote", "text": "..."})'
+    ),
+    "pptx": (
+        "a PowerPoint deck (content = a JSON object "
+        '{"title": "...", "subtitle"?: "...", "slides": [...]} with 5-10 slides). '
+        "Required slide fields BY LAYOUT — title/section: title (+ optional "
+        "subtitle, body); bullets/summary: title + bullets (3-5 strings, each "
+        "under 120 chars); twoColumn: title + leftBullets + rightBullets "
+        "(+ optional leftTitle, rightTitle); table: title + headers + rows; "
+        "quote: quote (+ optional attribution). Start with a title slide; every "
+        "layout supports speakerNotes — put citations and detail there, not on "
+        "the slide"
+    ),
 }
+
+# Structured types ride the same envelope but their content is a config DARE
+# validates with the SAME validators the main chat tools use — one schema,
+# no parallel implementation.
+_STRUCTURED_VALIDATORS = {
+    "docx": (execute_create_docx, "doc_config"),
+    "pptx": (execute_create_pptx, "ppt_config"),
+}
+
+_STRUCTURED_SCHEMAS = {
+    "docx": get_create_docx_tool_openai,
+    "pptx": get_create_pptx_tool_openai,
+}
+
+
+def _structured_schema(artifact_type):
+    """
+    The canonical JSON Schema for a structured type's `content` — the exact
+    schema DARE's chat tools advertise, embedded verbatim so the agent isn't
+    working from a prose paraphrase of it.
+    """
+    getter = _STRUCTURED_SCHEMAS.get(artifact_type)
+    if not getter:
+        return ""
+    return json.dumps(getter()["function"]["parameters"])
 
 
 def build_artifact_instructions(soul_content, artifact_type=""):
@@ -47,9 +110,15 @@ def build_artifact_instructions(soul_content, artifact_type=""):
         + want
         + "\n\nReturn ONLY a single JSON object — no prose, no markdown fences — "
         'shaped exactly: {"artifacts": [{"type": "...", "title": "...", '
-        '"content": "..."}]}. `content` is the raw artifact payload (mermaid/svg/'
-        "html text, or the Excalidraw scene JSON as a string)."
+        '"content": ...}]}. `content` is the raw artifact payload (mermaid/svg/'
+        "html/markdown text, the Excalidraw scene JSON as a string, or for "
+        "docx/pptx the document/deck JSON object itself)."
     )
+    schema = _structured_schema(artifact_type)
+    if schema:
+        parts.append(
+            f"The `content` object MUST conform to this JSON Schema:\n{schema}"
+        )
     return "\n\n".join(parts)
 
 
@@ -67,21 +136,27 @@ def _strip_code_fence(text):
     return text.strip()
 
 
-def parse_artifacts(output):
+def parse_artifacts(output, errors=None):
     """
     Parse the JSON artifact envelope into a list of
     {artifact_type, title, content}. Returns [] if the output isn't the contract.
+    Pass `errors` (a list) to collect the specific reasons items were rejected —
+    the repair re-ask feeds these back so the model fixes the actual problem.
     """
+    if errors is None:
+        errors = []
     if not output:
         return []
     try:
         data = json.loads(_strip_code_fence(output))
     except json.JSONDecodeError:
         logger.warning("Artifact output was not valid JSON")
+        errors.append("the reply was not a single valid JSON object")
         return []
 
     items = data.get("artifacts") if isinstance(data, dict) else None
     if not isinstance(items, list):
+        errors.append('the JSON object had no "artifacts" array')
         return []
 
     artifacts = []
@@ -90,12 +165,34 @@ def parse_artifacts(output):
             continue
         atype = str(item.get("type") or "").strip().lower()
         content = item.get("content")
-        if (
-            atype not in ALLOWED_TYPES
-            or not isinstance(content, str)
-            or not content.strip()
-        ):
+        if atype not in ALLOWED_TYPES:
+            errors.append(f'"{atype}" is not an allowed artifact type')
             continue
+
+        if atype in _STRUCTURED_VALIDATORS:
+            validator, config_key = _STRUCTURED_VALIDATORS[atype]
+            if isinstance(content, str):
+                try:
+                    content = json.loads(_strip_code_fence(content))
+                except json.JSONDecodeError:
+                    logger.warning("%s artifact content was not valid JSON", atype)
+                    errors.append(f"the {atype} content was not valid JSON")
+                    continue
+            if not isinstance(content, dict):
+                errors.append(f"the {atype} content must be a JSON object")
+                continue
+            result = validator(content)
+            if not result.get("success"):
+                logger.warning(
+                    "%s artifact failed validation: %s", atype, result.get("error")
+                )
+                errors.append(f"{atype}: {result.get('error')}")
+                continue
+            content = json.dumps(result[config_key], indent=2)
+        elif not isinstance(content, str) or not content.strip():
+            errors.append(f"the {atype} content must be a non-empty string")
+            continue
+
         artifacts.append(
             {
                 "artifact_type": atype,
