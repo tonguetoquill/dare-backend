@@ -55,6 +55,44 @@ def _fail(run, detail, exc):
     )
 
 
+def _session_key(project):
+    """The workspace's stable Hermes memory scope (X-Hermes-Session-Key)."""
+    return f"dare-proj{project.id}"
+
+
+def _reask_json(hermes, session_id, expectation):
+    """
+    One corrective re-ask when a structured reply wasn't parseable. Hermes's
+    API has no schema forcing — the contract is prompt-level — so the official
+    pattern is: parse defensively, then ask once for a repaired reply in the
+    same session (the model still has its previous answer in context).
+    """
+    try:
+        started = hermes.start_run(
+            input_text=(
+                "Your previous reply was not parseable. Return ONLY "
+                + expectation
+                + " — a single JSON object, no prose, no markdown fences."
+            ),
+            instructions="",
+            session_id=session_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - repair is best-effort
+        logger.warning("Corrective re-ask could not start: %s", exc)
+        return ""
+    chunks = []
+    try:
+        for event in hermes.stream_events(started["run_id"]):
+            etype = event.get("event")
+            if etype == "message.delta":
+                chunks.append(event.get("delta", ""))
+            elif etype == "run.completed":
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Corrective re-ask stream failed: %s", exc)
+    return "".join(chunks)
+
+
 @job("default")
 def run_scout_job(run_id):
     """Run a delegated Scout discovery end to end (Hermes web search -> staging)."""
@@ -118,6 +156,7 @@ def run_scout_job(run_id):
             input_text=scout_input,
             instructions=build_scout_instructions(soul_content),
             session_id=run.session.hermes_session_id,
+            session_key=_session_key(project),
         )
         hermes_run_id = started["run_id"]
     except Exception as exc:  # noqa: BLE001
@@ -164,9 +203,20 @@ def run_scout_job(run_id):
         return
 
     _set_status(run, "Evaluating findings…")
+    output = "".join(chunks)
+    items = parse_staging_items(output)
+    if not items and output.strip():
+        _set_status(run, "Repairing the result format…")
+        items = parse_staging_items(
+            _reask_json(
+                hermes,
+                run.session.hermes_session_id,
+                'the {"stagingItems": [...]} object from your instructions',
+            )
+        )
     now = timezone.now()
     staged = 0
-    for item in parse_staging_items("".join(chunks)):
+    for item in items:
         year = item.get("year")
         confidence = item.get("confidence")
         try:
@@ -235,6 +285,7 @@ def run_critic_job(run_id, item_id):
             input_text=critic_input(item),
             instructions=build_critic_instructions(soul_content),
             session_id=run.session.hermes_session_id,
+            session_key=_session_key(item.project),
         )
         hermes_run_id = started["run_id"]
     except Exception as exc:  # noqa: BLE001
@@ -276,7 +327,17 @@ def run_critic_job(run_id, item_id):
         return
 
     now = timezone.now()
-    verdict = parse_critic_verdict("".join(chunks))
+    output = "".join(chunks)
+    verdict = parse_critic_verdict(output)
+    if not verdict and output.strip():
+        verdict = parse_critic_verdict(
+            _reask_json(
+                hermes,
+                run.session.hermes_session_id,
+                'the {"verdict": ..., "reasoning": ..., "concerns": [...]} '
+                "object from your instructions",
+            )
+        )
     if verdict:
         item.critic_metadata = {
             **verdict,
@@ -320,6 +381,7 @@ def run_artifact_job(run_id):
             input_text=run.task,
             instructions=build_artifact_instructions(soul_content, artifact_type),
             session_id=run.session.hermes_session_id,
+            session_key=_session_key(project),
         )
         hermes_run_id = started["run_id"]
     except Exception as exc:  # noqa: BLE001
@@ -342,8 +404,20 @@ def run_artifact_job(run_id):
         return
 
     now = timezone.now()
+    output = "".join(chunks)
+    artifacts = parse_artifacts(output)
+    if not artifacts and output.strip():
+        _set_status(run, "Repairing the artifact format…")
+        artifacts = parse_artifacts(
+            _reask_json(
+                hermes,
+                run.session.hermes_session_id,
+                'the {"artifacts": [{"type": ..., "title": ..., "content": ...}]} '
+                "object from your instructions",
+            )
+        )
     created = 0
-    for art in parse_artifacts("".join(chunks)):
+    for art in artifacts:
         try:
             ResearchArtifact.objects.create(
                 project=project,

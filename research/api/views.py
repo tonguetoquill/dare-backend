@@ -170,6 +170,7 @@ class ResearchChatView(APIView):
                 input_text=message,
                 instructions=soul_content,
                 session_id=session.hermes_session_id,
+                session_key=f"dare-proj{project.id}",
             )
             hermes_run_id = started["run_id"]
         except Exception as exc:  # noqa: BLE001 - surface as a failed run

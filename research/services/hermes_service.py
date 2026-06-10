@@ -30,15 +30,22 @@ class HermesService:
             headers["Content-Type"] = "application/json"
         return headers
 
-    def start_run(self, *, input_text, instructions, session_id, timeout=30):
+    def start_run(
+        self, *, input_text, instructions, session_id, session_key=None, timeout=30
+    ):
         """
         Start an async run. The soul-file content rides in `instructions`;
-        `session_id` gives persistent cross-run memory. Returns the gateway JSON
-        (``{"run_id": ..., "status": "started"}``).
+        `session_id` gives persistent cross-run memory within one mode's thread.
+        `session_key` (Hermes's official X-Hermes-Session-Key) is the stable
+        long-term memory scope — one per research workspace, shared by all of
+        its modes. Returns the gateway JSON (``{"run_id": ..., "status": ...}``).
         """
+        headers = self._headers(json_body=True)
+        if session_key:
+            headers["X-Hermes-Session-Key"] = session_key
         resp = requests.post(
             f"{self.base_url}/v1/runs",
-            headers=self._headers(json_body=True),
+            headers=headers,
             json={
                 "input": input_text,
                 "instructions": instructions,
