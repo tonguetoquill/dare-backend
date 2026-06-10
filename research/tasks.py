@@ -83,17 +83,25 @@ def run_scout_job(run_id):
         logger.warning("Scout MCP context gather failed: %s", exc)
         tool_results = []
     # These credentialed pre-fetch calls are part of the run's audit trail too —
-    # log them with a result preview so the Runs view shows what came back.
+    # log them with a result preview (or the error) so the Runs view shows what
+    # actually came back. Failed calls are never injected as evidence.
     for r in tool_results:
         ResearchAgentToolCall.objects.create(
             run=run,
             tool=f"{r['slug']}__{r['tool']}",
             arguments={"query": task},
-            status=AgentToolCallStatus.SUCCESS,
-            result_summary=r["text"][:500],
+            status=(
+                AgentToolCallStatus.ERROR
+                if r["error"]
+                else AgentToolCallStatus.SUCCESS
+            ),
+            result_summary=(r["error"] or r["text"])[:500],
+            error=r["error"],
         )
     mcp_context = "\n\n".join(
-        f"### {r['slug']} · {r['tool']}\n{r['text']}" for r in tool_results
+        f"### {r['slug']} · {r['tool']}\n{r['text']}"
+        for r in tool_results
+        if r["text"] and not r["error"]
     )
     if mcp_context:
         scout_input = (
@@ -136,7 +144,9 @@ def run_scout_job(run_id):
                 ResearchAgentToolCall.objects.create(
                     run=run,
                     tool=event.get("tool", ""),
-                    arguments={"query": last_preview or task},
+                    # Only the real call preview — substituting the task text
+                    # here misleads the Runs audit when Hermes sends none.
+                    arguments={"query": last_preview},
                     status=(
                         AgentToolCallStatus.ERROR
                         if event.get("error")

@@ -120,9 +120,10 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
     Run the primary tool of each of the user's connected servers whose slug is in
     `slugs`, with {query} — so a delegated run (Scout) can draw on credentialed
     tools (Consensus, Scite, …) that DARE executes on its behalf. Returns
-    [{"slug", "tool", "text"}, ...]. Synchronous (for jobs); best-effort,
-    failures are skipped. Credentials and audit stay in DARE (calls go through
-    the executor).
+    [{"slug", "tool", "text", "error"}, ...]; failed calls come back with
+    `error` set (and empty text) so callers can audit them honestly instead of
+    treating an error payload as a result. Synchronous (for jobs). Credentials
+    and audit stay in DARE (calls go through the executor).
     """
     wanted = {s.lower() for s in (slugs or [])}
     if not wanted:
@@ -152,22 +153,33 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
             result = async_to_sync(mcp_tool_executor.execute_tool_call)(
                 user, slug, tool_name, {param: query}
             )
-        except Exception as exc:  # noqa: BLE001 - best-effort
+        except Exception as exc:  # noqa: BLE001 - audit the failure
             logger.warning("gather_tool_results %s.%s failed: %s", slug, tool_name, exc)
+            results.append(
+                {"slug": slug, "tool": tool_name, "text": "", "error": str(exc)[:500]}
+            )
             continue
         text = _result_text(result).strip()
-        if text:
+        # MCP marks tool failures with isError + an error message as content
+        # (e.g. "API request failed with status 500") — that is an error, not
+        # a result, and must never be injected as evidence.
+        if isinstance(result, dict) and result.get("isError"):
             results.append(
-                {"slug": slug, "tool": tool_name, "text": text[:per_tool_chars]}
+                {"slug": slug, "tool": tool_name, "text": "", "error": text or "Tool error"}
+            )
+        elif text:
+            results.append(
+                {"slug": slug, "tool": tool_name, "text": text[:per_tool_chars], "error": ""}
             )
     return results
 
 
 def gather_tool_context(user, slugs, query, per_tool_chars=4000):
-    """`gather_tool_results` as one text block, for prompt injection."""
+    """`gather_tool_results` as one text block (successes only), for prompt injection."""
     return "\n\n".join(
         f"### {r['slug']} · {r['tool']}\n{r['text']}"
         for r in gather_tool_results(user, slugs, query, per_tool_chars)
+        if r["text"] and not r["error"]
     )
 
 
