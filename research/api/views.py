@@ -395,7 +395,7 @@ class ResearchArtifactGenerateView(APIView):
             request.data.get("artifact_type") or request.data.get("artifactType") or ""
         ).strip()
 
-        session = ResearchSession.get_or_create_scout_session(project, request.user)
+        session = ResearchSession.get_or_create_artifact_session(project, request.user)
         soul = SoulFile.active_objects.filter(project=project).first()
         version = soul.current_version() if soul else None
         soul_label = f"v{version.version}" if version else ""
@@ -405,7 +405,7 @@ class ResearchArtifactGenerateView(APIView):
             project=project,
             user=request.user,
             role="presenter",
-            mode=ResearchSessionMode.SCOUT,
+            mode=ResearchSessionMode.ARTIFACT,
             task=prompt,
             status=AgentRunStatus.RUNNING,
             status_detail="Queued…",

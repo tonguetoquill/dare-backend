@@ -45,19 +45,22 @@ class StandardsTemplate:
 
 class ResearchSessionMode:
     """
-    The two delegation modes (DARE-owned, enforced). Each maps 1:1 to a Hermes
-    session: a persistent 'scout' session and a persistent 'chat' session per
-    project.
+    The delegation modes (DARE-owned, enforced). Each maps 1:1 to a Hermes
+    session per project: a persistent 'scout' session, a persistent 'chat'
+    session, and a persistent 'artifact' session (the Presentation Assistant —
+    kept separate so artifact work never mixes into Scout's session memory).
     """
 
     SCOUT = "scout"
     CHAT = "chat"
+    ARTIFACT = "artifact"
 
     @classmethod
     def choices(cls):
         return [
             (cls.SCOUT, "Scout"),
             (cls.CHAT, "Chat"),
+            (cls.ARTIFACT, "Artifact"),
         ]
 
 

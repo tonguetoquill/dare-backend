@@ -170,6 +170,11 @@ class ResearchSession(BaseModel):
         """The project's one persistent scout session (stable hermes_session_id)."""
         return cls._get_or_create(project, user, ResearchSessionMode.SCOUT)
 
+    @classmethod
+    def get_or_create_artifact_session(cls, project, user):
+        """The project's one persistent artifact session (stable hermes_session_id)."""
+        return cls._get_or_create(project, user, ResearchSessionMode.ARTIFACT)
+
 
 class ResearchAgentRun(BaseModel):
     """
