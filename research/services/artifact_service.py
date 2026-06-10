@@ -112,9 +112,13 @@ def build_artifact_instructions(soul_content, artifact_type=""):
         "and emphasis from their words and the project's approved knowledge; "
         "never require specifications or ask follow-up questions. Everything "
         "you produce must be about THIS project (its research question and "
-        "approved knowledge). If the request names no subject and the project "
-        'context gives you nothing concrete, return {"artifacts": []} — never '
-        "invent content unrelated to the project. "
+        "approved knowledge). Decline ONLY when the request names no subject "
+        "at all AND the project context is empty (e.g. just 'generate an "
+        "artifact"
+        ' in a blank project) — then return {"artifacts": []}. '
+        "Any request that names a subject, audience, or purpose (a briefing, "
+        "a deck for a team, a diagram of the evidence) MUST produce an "
+        "artifact grounded in the project. "
         + want
         + "\n\nReturn ONLY a single JSON object — no prose, no markdown fences — "
         'shaped exactly: {"artifacts": [{"type": "...", "title": "...", '
