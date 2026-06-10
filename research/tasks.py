@@ -192,8 +192,10 @@ def run_scout_job(run_id):
     # DARE; Hermes structures these alongside its own web_search into staging.
     _set_status(run, "Querying research tools…")
     scout_input = task
+    # The composer's per-run selection narrows the project's enabled set.
+    run_tools = (run.selected_context or {}).get("tools") or project.enabled_tools
     try:
-        tool_results = gather_tool_results(run.user, project.enabled_tools, task)
+        tool_results = gather_tool_results(run.user, run_tools, task)
     except Exception as exc:  # noqa: BLE001 - non-fatal
         logger.warning("Scout MCP context gather failed: %s", exc)
         tool_results = []

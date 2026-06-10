@@ -309,6 +309,14 @@ class ResearchScoutView(APIView):
         # 'quick' caps the search/read budget (the token-cost lever); anything
         # else gets the default deep run.
         depth = "quick" if request.data.get("depth") == "quick" else "deep"
+        # Per-run tool selection from the composer; sanitized against the
+        # project's enabled set (a run can narrow the toolset, never widen it).
+        requested = request.data.get("tools")
+        tools = (
+            [t for t in requested if isinstance(t, str) and t in project.enabled_tools]
+            if isinstance(requested, list)
+            else list(project.enabled_tools)
+        )
 
         session = ResearchSession.get_or_create_scout_session(project, request.user)
         soul = SoulFile.active_objects.filter(project=project).first()
@@ -325,8 +333,8 @@ class ResearchScoutView(APIView):
             status=AgentRunStatus.RUNNING,
             status_detail="Queued…",
             soul_file_version=soul_label,
-            allowed_tools=["web"],
-            selected_context={"depth": depth},
+            allowed_tools=tools or ["web"],
+            selected_context={"depth": depth, "tools": tools},
             started_at=timezone.now(),
         )
         run_scout_job.delay(run.id)

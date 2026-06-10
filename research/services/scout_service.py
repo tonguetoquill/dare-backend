@@ -53,7 +53,9 @@ Return ONLY a single JSON object — no prose, no markdown code fences — shape
     "citationContext": "a short relevant quote/context when available"
   }
 ]}
-Return %(max_candidates)d items at most. `confidence` is a number from 0.0 to 1.0."""
+Stage as many genuinely relevant sources as the evidence justifies, up to
+%(max_candidates)d — do not pad to reach the cap, and do not drop a strong
+source just to stay short. `confidence` is a number from 0.0 to 1.0."""
 
 
 def build_scout_instructions(soul_content, max_candidates=4, max_searches=4):
