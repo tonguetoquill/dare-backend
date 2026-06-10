@@ -393,14 +393,17 @@ def run_scout_job(run_id):
         )
         _finish(run, detail, hermes, failed=not staged)
     elif staged == 0:
-        # Surface what the agent actually said — a vague ask ("hello") or a
-        # deliberate no-result should be readable on the run card, not opaque.
-        snippet = " ".join(output.split())[:150]
-        detail = (
-            f"Staged 0 findings — agent replied: “{snippet}…”"
-            if snippet
-            else "Staged 0 findings."
-        )
+        # Surface what happened — a deliberate empty envelope (no research
+        # intent in the request) reads differently from an opaque zero.
+        if '"stagingItems"' in output:
+            detail = "Staged 0 findings — the request had nothing to research."
+        else:
+            snippet = " ".join(output.split())[:150]
+            detail = (
+                f"Staged 0 findings — agent replied: “{snippet}…”"
+                if snippet
+                else "Staged 0 findings."
+            )
         _finish(run, detail, hermes)
     else:
         _finish(run, f"Staged {staged} finding{plural}.", hermes)
