@@ -160,10 +160,12 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
     Run the primary tool of each of the user's connected servers whose slug is in
     `slugs`, with {query} — so a delegated run (Scout) can draw on credentialed
     tools (Consensus, Scite, …) that DARE executes on its behalf. Returns
-    [{"slug", "tool", "text", "error"}, ...]; failed calls come back with
-    `error` set (and empty text) so callers can audit them honestly instead of
-    treating an error payload as a result. Synchronous (for jobs). Credentials
-    and audit stay in DARE (calls go through the executor).
+    [{"slug", "tool", "text", "raw", "error"}, ...]: `text` is what gets
+    injected into the run (compacted for scholarly results, capped for token
+    control); `raw` is the tool's complete, untrimmed response for the audit
+    record. Failed calls come back with `error` set (and empty text) so callers
+    can audit them honestly instead of treating an error payload as a result.
+    Synchronous (for jobs). Credentials and audit stay in DARE.
     """
     wanted = {s.lower() for s in (slugs or [])}
     if not wanted:
@@ -205,7 +207,13 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
         # a result, and must never be injected as evidence.
         if isinstance(result, dict) and result.get("isError"):
             results.append(
-                {"slug": slug, "tool": tool_name, "text": "", "error": text or "Tool error"}
+                {
+                    "slug": slug,
+                    "tool": tool_name,
+                    "text": "",
+                    "raw": "",
+                    "error": text or "Tool error",
+                }
             )
         elif text:
             compact = _compact_scholarly_hits(text)
@@ -214,6 +222,7 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
                     "slug": slug,
                     "tool": tool_name,
                     "text": (compact or text)[:per_tool_chars],
+                    "raw": text,
                     "error": "",
                 }
             )

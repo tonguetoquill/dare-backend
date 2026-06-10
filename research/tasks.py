@@ -210,9 +210,10 @@ def run_scout_job(run_id):
                 if r["error"]
                 else AgentToolCallStatus.SUCCESS
             ),
-            # Full text (gather already caps it) — the Runs view lets the
-            # scholar expand a call to inspect exactly what came back.
-            result_summary=r["error"] or r["text"],
+            # The tool's complete raw response — never trimmed. The Runs view
+            # lets the scholar expand a call and audit exactly what came back;
+            # only the prompt injection is compacted/capped, not the record.
+            result_summary=r["error"] or r["raw"],
             error=r["error"],
         )
     mcp_context = "\n\n".join(
@@ -239,16 +240,17 @@ def run_scout_job(run_id):
 
     _set_status(run, "Starting Scout…")
     session_id = _run_session_id(run)
-    # Quick runs halve the search/read budget — the main token-cost lever
-    # (each fetched page adds thousands of input tokens to the run).
+    # Quick runs run a small budget; deep runs a generous one — real research
+    # deserves a real result set (each fetched page costs input tokens, but
+    # the per-run budget caps the blast radius).
     quick = (run.selected_context or {}).get("depth") == "quick"
     try:
         started = hermes.start_run(
             input_text=scout_input,
             instructions=build_scout_instructions(
                 soul_content,
-                max_candidates=2 if quick else 4,
-                max_searches=2 if quick else 4,
+                max_candidates=3 if quick else 6,
+                max_searches=2 if quick else 5,
             ),
             session_id=session_id,
             session_key=_session_key(project),
