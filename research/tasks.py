@@ -355,7 +355,9 @@ def run_scout_job(run_id):
                 citation_context=str(item.get("citationContext") or ""),
                 status=StagingItemStatus.STAGED,
                 provenance={
-                    "tool": "web",
+                    # The agent declares which search surfaced each candidate —
+                    # only it can see its in-loop tool results.
+                    "tool": str(item.get("sourceTool") or "web")[:32],
                     "query": task,
                     "retrievedAt": now.isoformat(),
                     "soulFileId": soul.id if soul else None,

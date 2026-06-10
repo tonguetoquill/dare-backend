@@ -50,7 +50,8 @@ Return ONLY a single JSON object — no prose, no markdown code fences — shape
     "confidence": 0.0,
     "confidenceRationale": "why this confidence level",
     "evidenceLabel": "supporting | disputing | partial | tangential | unverifiable",
-    "citationContext": "a short relevant quote/context when available"
+    "citationContext": "a short relevant quote/context when available",
+    "sourceTool": "which search surfaced this candidate: scite | consensus | web"
   }
 ]}
 Stage as many genuinely relevant sources as the evidence justifies, up to
@@ -107,6 +108,20 @@ def find_json_object(text, required_key=None):
     return fallback
 
 
+def _scan_objects(text):
+    """Yield every complete JSON object found anywhere in `text`."""
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    while index != -1:
+        try:
+            obj, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        yield obj
+        index = text.find("{", end)
+
+
 def parse_staging_items(output):
     """
     Extract the `stagingItems` array from Scout's output, tolerating stray prose,
@@ -121,8 +136,25 @@ def parse_staging_items(output):
         text = re.sub(r"```$", "", text).strip()
 
     data = find_json_object(text, required_key="stagingItems")
-    if not isinstance(data, dict):
-        logger.warning("Scout output was not JSON-parseable")
-        return []
-    items = data.get("stagingItems", [])
-    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+    if isinstance(data, dict) and "stagingItems" in data:
+        items = data.get("stagingItems", [])
+        return (
+            [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+        )
+
+    # Salvage: a malformed envelope (e.g. the model never closed the outer
+    # brace) still contains complete, individually-parseable item objects.
+    if '"stagingItems"' in text:
+        items = [
+            o
+            for o in _scan_objects(text)
+            if isinstance(o, dict) and "title" in o and "stagingItems" not in o
+        ]
+        if items:
+            logger.warning(
+                "Scout envelope was malformed; salvaged %d item(s)", len(items)
+            )
+            return items
+
+    logger.warning("Scout output was not JSON-parseable")
+    return []
