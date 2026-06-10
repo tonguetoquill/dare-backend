@@ -541,7 +541,9 @@ def run_artifact_job(run_id):
     output = "".join(chunks)
     problems = []
     artifacts = parse_artifacts(output, errors=problems)
-    if not artifacts and output.strip():
+    # Re-ask only on actual format problems — a valid empty envelope is the
+    # model deliberately declining a no-substance request, not a parse failure.
+    if not artifacts and output.strip() and problems:
         _set_status(run, "Repairing the artifact format…")
         expectation = (
             'the {"artifacts": [{"type": ..., "title": ..., "content": ...}]} '

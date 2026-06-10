@@ -96,6 +96,18 @@ def _sse(payload):
     return f"data: {json.dumps(payload)}\n\n"
 
 
+# Standing chat framing, layered over the soul file: chat is for thinking, the
+# Artifacts tab is for producing — large payloads don't belong in a transcript.
+CHAT_BRIEF = (
+    "You are the project's research assistant in hands-on chat — think live "
+    "with the scholar under the standards above. If they ask you to produce a "
+    "renderable artifact (a diagram, deck, document, or figure), give at most "
+    "a brief sketch of what it could contain and point them to the Artifacts "
+    "tab, which generates and saves artifacts properly — do not paste large "
+    "artifact payloads into the chat."
+)
+
+
 class ResearchChatView(APIView):
     """
     Hands-on chat for a project — one persistent chat session, backed by Hermes.
@@ -168,7 +180,9 @@ class ResearchChatView(APIView):
         try:
             started = hermes.start_run(
                 input_text=message,
-                instructions=soul_content,
+                instructions=(
+                    f"{soul_content}\n\n{CHAT_BRIEF}" if soul_content else CHAT_BRIEF
+                ),
                 session_id=session.hermes_session_id,
                 session_key=f"dare-proj{project.id}",
             )

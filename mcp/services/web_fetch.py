@@ -19,7 +19,10 @@ from config import env
 logger = logging.getLogger(__name__)
 
 FETCH_TIMEOUT = 15.0
-MAX_CHARS = 12_000
+# Generous: a full paper should come through whole — truncating mid-paper
+# degrades staging quality. Runaway cost is contained by the per-run budget
+# (tool-call + wall-clock caps), not by chopping sources.
+MAX_CHARS = 40_000
 # Below this, the plain fetch likely hit a block/consent/JS shell — try the
 # LLM-backed reader instead.
 _MIN_USEFUL_CHARS = 500
