@@ -14,7 +14,7 @@ import logging
 
 from asgiref.sync import async_to_sync
 
-from mcp.models import UserMCPConnection
+from mcp.models import GatewayFetch, UserMCPConnection
 from mcp.services.mcp_tool_executor import mcp_tool_executor
 from mcp.services.web_fetch import fetch_page
 
@@ -70,6 +70,43 @@ def list_user_tools(user):
                 }
             )
     return tools
+
+
+def _doi_from_url(url):
+    """The DOI in a (dx.)doi.org URL, or empty."""
+    for host in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/"):
+        if url.startswith(host):
+            return url[len(host) :].strip("/")
+    return ""
+
+
+def _capture_fetch(user, tool, content, arguments):
+    """
+    Persist the complete response of a gateway-served call (the agent's reading
+    corpus). Page fetches dedup by URL; everything else is one row per call.
+    Capture must never break the call it records.
+    """
+    if not content:
+        return
+    url = str(arguments.get("url") or "")[:1000]
+    try:
+        if url:
+            GatewayFetch.all_objects.update_or_create(
+                user=user,
+                tool=tool,
+                url=url,
+                defaults={
+                    "doi": _doi_from_url(url),
+                    "arguments": arguments,
+                    "content": content,
+                },
+            )
+        else:
+            GatewayFetch.all_objects.create(
+                user=user, tool=tool, arguments=arguments, content=content
+            )
+    except Exception:  # noqa: BLE001 - capture is best-effort by design
+        logger.exception("Gateway fetch capture failed for %s", tool)
 
 
 def _result_text(result):
@@ -195,6 +232,7 @@ def _search_with_primary_tool(user, conn, query, per_tool_chars):
         return entry(error=text or "Tool error")
     if not text:
         return None
+    _capture_fetch(user, f"{slug}{_SEP}{tool_name}", text, {param: query})
     compact = _compact_scholarly_hits(text)
     return entry(text=(compact or text)[:per_tool_chars], raw=text)
 
@@ -250,6 +288,7 @@ def _handle_tool_call(user, rpc_id, params):
         except Exception as exc:  # noqa: BLE001 - surface as a tool error
             logger.warning("MCP gateway builtin %s failed: %s", name, exc)
             return _error(rpc_id, -32000, str(exc))
+        _capture_fetch(user, name, text, arguments)
         return _result(rpc_id, {"content": [{"type": "text", "text": text}]})
 
     if _SEP not in name:
@@ -264,6 +303,8 @@ def _handle_tool_call(user, rpc_id, params):
         return _error(rpc_id, -32000, str(exc))
 
     # The executor returns the tool result; normalise to MCP content.
+    if not (isinstance(result, dict) and result.get("isError")):
+        _capture_fetch(user, name, _result_text(result).strip(), arguments)
     if isinstance(result, dict) and "content" in result:
         return _result(rpc_id, result)
     text = result if isinstance(result, str) else json.dumps(result)
