@@ -149,7 +149,7 @@ def parse_staging_items(output):
         items = [
             o
             for o in _scan_objects(text)
-            if isinstance(o, dict) and "title" in o and "stagingItems" not in o
+            if isinstance(o, dict) and o.get("title") and "stagingItems" not in o
         ]
         if items:
             logger.warning(

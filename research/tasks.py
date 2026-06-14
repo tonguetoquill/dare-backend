@@ -291,13 +291,22 @@ def _stage_items(run, items, soul, version):
     now = timezone.now()
     staged = 0
     for item in items:
+        if not isinstance(item, dict):
+            continue
+        # DB-boundary guard: a candidate with no title is malformed model
+        # output — a template echo or salvage noise from a repaired envelope.
+        # Persisting it floods the review inbox with empty cards, so drop it.
+        title = str(item.get("title") or "").strip()
+        if not title:
+            logger.warning("Scout staging skipped a titleless item (run %s)", run.id)
+            continue
         year = item.get("year")
         confidence = item.get("confidence")
         try:
             ResearchStagingItem.objects.create(
                 project=run.project,
                 run=run,
-                title=str(item.get("title") or "")[:512],
+                title=title[:512],
                 authors=str(item.get("authors") or "")[:512],
                 year=year if isinstance(year, int) else None,
                 venue=str(item.get("venue") or "")[:255],
