@@ -125,13 +125,20 @@ def _result_text(result):
     return str(result)
 
 
+# How much of each paper's abstract to keep in the compacted view. The
+# abstract is the source's actual claim — enough to triage, and to ground a
+# finding when the full text is paywalled — so it's worth carrying (~1k tokens
+# for ten papers) rather than dropping it and forcing a fetch to recover it.
+_ABSTRACT_CHARS = 700
+
+
 def _compact_scholarly_hits(text):
     """
-    Compact a scholarly search result (Scite-style JSON with `hits`) into one
-    line per paper — title, authors, year, venue, DOI, citation tallies. The
-    raw JSON buries ~1 paper in bloat per 4k chars; compacted, ten papers (with
-    their DOIs, ready to fetch) fit in the same space. Returns None when the
-    text isn't that shape.
+    Compact a scholarly search result (Scite-style JSON with `hits`) into a few
+    lines per paper — title, authors, year, venue, DOI, citation tallies, and a
+    trimmed abstract. The raw JSON buries ~1 paper in bloat per 4k chars;
+    compacted, ten papers (with their DOIs and abstracts) fit in a fraction of
+    that. Returns None when the text isn't that shape.
     """
     try:
         data = json.loads(text)
@@ -156,12 +163,16 @@ def _compact_scholarly_hits(text):
             else ""
         )
         doi = hit.get("doi") or ""
-        lines.append(
+        line = (
             f"- {hit.get('title', '?')} ({names}, {hit.get('year', '?')}) "
             f"| {hit.get('journal', '?')}"
             + (f" | DOI: {doi} -> https://doi.org/{doi}" if doi else "")
             + cites
         )
+        abstract = (hit.get("abstract") or "").strip()
+        if abstract:
+            line += f"\n  abstract: {abstract[:_ABSTRACT_CHARS]}"
+        lines.append(line)
     return "\n".join(lines) if lines else None
 
 
@@ -237,7 +248,7 @@ def _search_with_primary_tool(user, conn, query, per_tool_chars):
     return entry(text=(compact or text)[:per_tool_chars], raw=text)
 
 
-def gather_tool_results(user, slugs, query, per_tool_chars=4000):
+def gather_tool_results(user, slugs, query, per_tool_chars=12000):
     """
     Run the primary tool of each of the user's connected servers whose slug is
     in `slugs` with the query — so a delegated run (Scout) can draw on
@@ -260,7 +271,7 @@ def gather_tool_results(user, slugs, query, per_tool_chars=4000):
     return results
 
 
-def gather_tool_context(user, slugs, query, per_tool_chars=4000):
+def gather_tool_context(user, slugs, query, per_tool_chars=12000):
     """`gather_tool_results` as one text block (successes only), for prompt injection."""
     return "\n\n".join(
         f"### {r['slug']} · {r['tool']}\n{r['text']}"

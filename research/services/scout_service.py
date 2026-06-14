@@ -30,11 +30,14 @@ Workflow — search first, then READ before you stage:
    PRIORITIZE peer-reviewed scholarly results (Scite, Consensus) over generic web
    snippets, and draw candidates from EVERY scholarly tool that returned results,
    not just one. Run AT MOST %(max_searches)d search calls total.
-2. READ — required, not optional. Only stage a source whose page you fetched
-   with the `fetch_page` MCP tool this run (for papers, fetch the DOI link:
-   https://doi.org/<doi>). `citationContext` must be a verbatim quote from the
-   fetched text — never from a search snippet. A candidate you could not fetch
-   is at best `evidenceLabel: "unverifiable"` with low confidence. Fetch AT MOST
+2. READ before you stage. Fetch a promising source's page with the `fetch_page`
+   MCP tool (for papers, the DOI link: https://doi.org/<doi>) and quote the
+   fetched text in `citationContext`. If the full text cannot be fetched
+   (paywall, fetch error) but the credentialed results gave you the paper's
+   abstract, you MAY ground `citationContext` in that published abstract — it
+   is the authors' own summary, not a search snippet — and judge the evidence
+   from it. Only fall to `evidenceLabel: "unverifiable"` with low confidence
+   when you have neither fetched text nor an abstract. Fetch AT MOST
    %(max_candidates)d pages; prefer fetch_page over any browser or extract tool.
 3. Never fabricate — only include sources you actually found, with bibliographic
    details exactly as published, including `doi` whenever known.
