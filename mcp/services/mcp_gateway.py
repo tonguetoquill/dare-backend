@@ -285,9 +285,15 @@ def _handle_tool_call(user, rpc_id, params):
     if name in _BUILTIN_HANDLERS:
         try:
             text = _BUILTIN_HANDLERS[name](user, arguments)
-        except Exception as exc:  # noqa: BLE001 - surface as a tool error
-            logger.warning("MCP gateway builtin %s failed: %s", name, exc)
-            return _error(rpc_id, -32000, str(exc))
+        except Exception as exc:  # noqa: BLE001 - surface as a tool-level error
+            # isError (not a JSON-RPC error) so the agent gets the message and
+            # moves on, and the run audit records an honest failed tool call —
+            # never a false success with a refusal passed off as content.
+            logger.info("MCP gateway builtin %s failed: %s", name, exc)
+            return _result(
+                rpc_id,
+                {"content": [{"type": "text", "text": str(exc)}], "isError": True},
+            )
         _capture_fetch(user, name, text, arguments)
         return _result(rpc_id, {"content": [{"type": "text", "text": text}]})
 

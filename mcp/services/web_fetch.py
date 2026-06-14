@@ -1,134 +1,138 @@
 """
-Fast page fetch for the MCP gateway — DARE's own web reader.
+Page fetch for the MCP gateway — DARE's own web reader.
 
-The agent runtime's built-in page extraction (Playwright) proved slow (minutes
-on some pages), so DARE offers its own: a plain HTTP fetch with lightweight
-text extraction (fast path), falling back to Gemini's url_context reader for
-pages that block plain clients or need JS rendering. Exposed to agents through
-the gateway as the builtin `fetch_page` tool.
+The agent runtime's built-in page extraction (Hermes ``web_extract``, Playwright-
+backed) proved slow — minutes on some pages. DARE's chat already has a fast,
+reliable reader: Anthropic's native ``web_fetch`` server tool (the same one the
+"Web Fetch" toggle drives in a normal conversation). The gateway exposes exactly
+that, as the builtin ``fetch_page`` tool, so a delegated agent reads pages the
+same way the chat does.
+
+Failure is honest: when the page genuinely can't be retrieved (paywall, block,
+robots, a fetch error), Anthropic returns a ``web_fetch_tool_error`` with an
+``error_code`` — we raise on it rather than passing the model's polite refusal
+back as if it were page content. The gateway turns the raised error into a tool
+error, so the run's audit shows the call failed instead of a false success.
 """
 
 import logging
-import re
-from html.parser import HTMLParser
 
-import httpx
-
-from config import env
+from conversations.constants import Provider
+from core.services.api_key_service import get_provider_api_key_sync
 
 logger = logging.getLogger(__name__)
 
-FETCH_TIMEOUT = 15.0
-# Generous: a full paper should come through whole — truncating mid-paper
-# degrades staging quality. Runaway cost is contained by the per-run budget
-# (tool-call + wall-clock caps), not by chopping sources.
+# A full paper should come through whole — truncating mid-paper degrades staging
+# quality. Runaway cost is contained by the per-run budget, not by chopping.
 MAX_CHARS = 40_000
-# Below this, the plain fetch likely hit a block/consent/JS shell — try the
-# LLM-backed reader instead.
-_MIN_USEFUL_CHARS = 500
-
-GEMINI_FETCH_MODEL = "gemini-2.5-flash"
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+# Cheap model to drive the server-side fetch; the readable text comes from the
+# web_fetch tool result, not the model's own knowledge.
+WEB_FETCH_MODEL = "claude-haiku-4-5-20251001"
+_BETA_HEADER = "web-fetch-2025-09-10"
+_TOOL = {
+    "type": "web_fetch_20250910",
+    "name": "web_fetch",
+    "max_uses": 1,
+    "citations": {"enabled": False},
+    "max_content_tokens": 50_000,
 }
 
 
-class _TextExtractor(HTMLParser):
-    """Strip tags, dropping script/style/chrome so only readable text remains."""
-
-    _SKIP = {"script", "style", "noscript", "svg", "header", "footer", "nav"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self._skip_depth = 0
-        self.parts = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self._SKIP:
-            self._skip_depth += 1
-
-    def handle_endtag(self, tag):
-        if tag in self._SKIP and self._skip_depth:
-            self._skip_depth -= 1
-
-    def handle_data(self, data):
-        if not self._skip_depth and data.strip():
-            self.parts.append(data.strip())
+class FetchError(Exception):
+    """A page genuinely could not be fetched (paywall, block, fetch error)."""
 
 
-def _extract_text(html):
-    parser = _TextExtractor()
-    try:
-        parser.feed(html)
-    except Exception:  # noqa: BLE001 - malformed HTML; keep what was parsed
-        pass
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(parser.parts)).strip()
+def _fetch_result(message):
+    """The web_fetch tool-result block as a plain dict, or None. Dicts (via
+    model_dump) navigate reliably across SDK versions; nested SDK attribute
+    access does not."""
+    for block in message.content:
+        data = block.model_dump() if hasattr(block, "model_dump") else block
+        if isinstance(data, dict) and data.get("type") == "web_fetch_tool_result":
+            return data
+    return None
 
 
-def _fetch_plain(url):
-    with httpx.Client(
-        timeout=FETCH_TIMEOUT, follow_redirects=True, headers=_HEADERS
-    ) as client:
-        resp = client.get(url)
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        if "html" in content_type:
-            return _extract_text(resp.text)
-        if "text" in content_type or "json" in content_type:
-            return resp.text.strip()
-        # Binary (PDF, …) — the plain path can't read it; the fallback can.
+def _pdf_text(b64_data):
+    """Extract text from a base64 PDF the fetch tool returned (no model needed)."""
+    import base64
+    import io
+
+    from PyPDF2 import PdfReader
+
+    reader = PdfReader(io.BytesIO(base64.b64decode(b64_data)))
+    return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+
+
+def _document_text(result):
+    """
+    Readable text straight from the web_fetch_result document — the fast path.
+    The server tool already fetched and parsed the page, so we read its text
+    here instead of waiting for the model to re-emit it (which is slow and
+    costly). Handles text pages directly and PDFs by local extraction.
+    """
+    source = ((result.get("content") or {}).get("content") or {}).get("source") or {}
+    data = source.get("data")
+    if not isinstance(data, str) or not data:
         return ""
-
-
-def _fetch_via_gemini(url):
-    """Read the page through Gemini's url_context (handles JS/blocked pages)."""
-    api_key = env.GEMINI_API_KEY
-    if not api_key:
-        return ""
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=GEMINI_FETCH_MODEL,
-        contents=(
-            "Return the full readable text content of this page, verbatim "
-            f"where possible, with no commentary of your own: {url}"
-        ),
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(url_context=types.UrlContext())]
-        ),
-    )
-    return (response.text or "").strip()
+    if source.get("type") == "text":
+        return data.strip()
+    if source.get("type") == "base64" and "pdf" in (source.get("media_type") or ""):
+        try:
+            return _pdf_text(data)
+        except Exception as exc:  # noqa: BLE001 - unreadable PDF; report as a miss
+            logger.info("fetch_page PDF extraction failed: %s", exc)
+    return ""
 
 
 def fetch_page(url):
     """
-    Given a URL, return clean readable text. Never raises — errors come back
-    as a text message so the calling agent can react and move on.
+    Return a page's readable text via Anthropic's native ``web_fetch`` tool —
+    DARE's chat reader. Raises ``FetchError`` when the page can't be retrieved,
+    so the gateway reports a tool error instead of a false success.
     """
     if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
-        return "Error: 'url' must be an http(s) URL."
+        raise FetchError("'url' must be an http(s) URL.")
 
-    text = ""
+    api_key = get_provider_api_key_sync(Provider.CLAUDE.value)
+    if not api_key:
+        raise FetchError("No Anthropic API key configured for page fetch.")
+
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
     try:
-        text = _fetch_plain(url)
-    except (httpx.HTTPError, httpx.InvalidURL) as exc:
-        logger.info("fetch_page plain fetch failed for %s: %s", url, exc)
+        message = client.messages.create(
+            model=WEB_FETCH_MODEL,
+            max_tokens=128,
+            tools=[_TOOL],
+            extra_headers={"anthropic-beta": _BETA_HEADER},
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Use the web_fetch tool to retrieve this URL. Do not "
+                        "summarise or repeat the page content — reply with only "
+                        f"the word DONE: {url}"
+                    ),
+                }
+            ],
+        )
+    except anthropic.APIError as exc:
+        raise FetchError(f"Page fetch request failed: {exc}") from exc
 
-    if len(text) < _MIN_USEFUL_CHARS:
-        try:
-            fallback = _fetch_via_gemini(url)
-            if len(fallback) > len(text):
-                text = fallback
-        except Exception as exc:  # noqa: BLE001 - best-effort fallback
-            logger.warning("fetch_page Gemini fallback failed for %s: %s", url, exc)
+    result = _fetch_result(message)
+    if result is None:
+        raise FetchError(f"The reader did not fetch {url}.")
 
+    content = result.get("content") or {}
+    if content.get("type") == "web_fetch_tool_error":
+        # Anthropic's own failure signal — surface it, never the apology text.
+        raise FetchError(
+            f"Could not fetch {url}: {content.get('error_code', 'unavailable')}."
+        )
+
+    text = _document_text(result)
     if not text:
-        return f"Could not retrieve readable content from {url}."
+        raise FetchError(f"Fetched {url} but found no readable text.")
     return text[:MAX_CHARS]

@@ -108,19 +108,30 @@ def _start_run(hermes, run, input_text, instructions):
     Hermes's session summaries), while the session KEY pins long-term memory
     to the project. Returns the Hermes run id, or None after failing the run.
     """
-    try:
-        started = hermes.start_run(
-            input_text=input_text,
-            instructions=instructions,
-            session_id=f"{run.session.hermes_session_id}-r{run.id}",
-            session_key=f"dare-proj{run.project_id}",
-        )
-    except Exception as exc:  # noqa: BLE001
-        _fail(run, "Could not reach the agent runtime.", exc)
-        return None
-    run.hermes_run_id = started["run_id"]
-    run.save(update_fields=["hermes_run_id", "updated_at"])
-    return run.hermes_run_id
+    session_id = f"{run.session.hermes_session_id}-r{run.id}"
+    session_key = f"dare-proj{run.project_id}"
+    # The runtime can be briefly unreachable (a gateway restart/drain); a single
+    # refused connection shouldn't sink the run, so retry with backoff before
+    # giving up. Starting a run is idempotent here — nothing began if it raised.
+    last_exc = None
+    for attempt in range(3):
+        try:
+            started = hermes.start_run(
+                input_text=input_text,
+                instructions=instructions,
+                session_id=session_id,
+                session_key=session_key,
+            )
+            run.hermes_run_id = started["run_id"]
+            run.save(update_fields=["hermes_run_id", "updated_at"])
+            return run.hermes_run_id
+        except Exception as exc:  # noqa: BLE001 - retry transient runtime hiccups
+            last_exc = exc
+            if attempt < 2:
+                _set_status(run, "Waiting for the agent runtime…")
+                time.sleep(2 * (attempt + 1))
+    _fail(run, "Could not reach the agent runtime.", last_exc)
+    return None
 
 
 _GATEWAY_PREFIX = "mcp_dare_"
@@ -169,13 +180,19 @@ def _record_tool_call(run, event, arguments):
     tool but omits its result), so link it back here for a complete record."""
     duration = event.get("duration")
     tool = event.get("tool", "")
-    error = event.get("error") or ""
+    raw_error = event.get("error")
+    error = bool(raw_error)
+    # The stream flags failure as a boolean; keep only a real string message.
+    error_text = raw_error if isinstance(raw_error, str) else ""
+    # Link the gateway result only for a successful call — a failed fetch
+    # captures nothing, so matching would borrow a neighbouring call's row.
     result_summary = ""
-    fetch = _match_gateway_fetch(run, tool)
-    if fetch:
-        result_summary = fetch.content
-        if fetch.url:
-            arguments = {**arguments, "url": fetch.url}
+    if not error:
+        fetch = _match_gateway_fetch(run, tool)
+        if fetch:
+            result_summary = fetch.content
+            if fetch.url:
+                arguments = {**arguments, "url": fetch.url}
     ResearchAgentToolCall.objects.create(
         run=run,
         tool=tool,
@@ -184,7 +201,7 @@ def _record_tool_call(run, event, arguments):
         result_summary=result_summary,
         duration_ms=int(duration * 1000) if duration else None,
         result_tokens=_token_count(result_summary),
-        error=error,
+        error=error_text,
     )
 
 
