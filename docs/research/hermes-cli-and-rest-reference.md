@@ -10,7 +10,6 @@
 > repo:
 > - `../deployment/research-mode-hermes.md` — set up & deploy Hermes (install → brain → API server → tool scoping → MCP gateway → smoke test)
 > - `research-mode-future-enhancements.md` — the roadmap (memory upgrades first)
-> - `scite-data-reference.md` — what data Scite actually returns and how Scout uses it
 > - `CHANGELOG-research-mode.md` — what shipped, in order
 >
 > The CLI/REST surface below was **verified against a live install (Hermes Agent

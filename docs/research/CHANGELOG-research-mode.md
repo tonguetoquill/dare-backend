@@ -69,7 +69,6 @@ the scholar gates what becomes knowledge.**
 - `docs/research/hermes-cli-and-rest-reference.md` — Hermes CLI + REST surface and
   the DARE⇄Hermes contract.
 - `docs/deployment/research-mode-hermes.md` — set up & deploy Hermes on a server.
-- `docs/research/scite-data-reference.md` — what Scite returns and how Scout uses it.
 - `docs/research/research-mode-future-enhancements.md` — the roadmap (memory first).
 
 ### Frontend (companion PR)
