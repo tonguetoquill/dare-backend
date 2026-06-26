@@ -65,6 +65,7 @@ LOCAL_APPS = [
     "memory",
     "sharing",
     "feature_flags",
+    "research",
 ]
 
 THIRD_PARTY_APPS = [
@@ -374,3 +375,9 @@ SYFTBOX = {
     'DATASITES_ROOT': env.SYFTBOX_DATASITES_ROOT,
     'APP_NAME': env.SYFTBOX_APP_NAME,
 }
+
+# Hermes agent runtime (delegated research-agent runtime for Research Mode)
+HERMES_GATEWAY_URL = env.HERMES_GATEWAY_URL
+HERMES_API_KEY = env.HERMES_API_KEY
+HERMES_SYNC_SOUL = env.HERMES_SYNC_SOUL
+HERMES_SOUL_PATH = env.HERMES_SOUL_PATH

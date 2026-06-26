@@ -1,0 +1,164 @@
+"""
+Scout delegation helpers — how DARE asks Hermes to find sources and how it reads
+the result back.
+
+The contract: DARE sends the task as the run `input` and the soul file + a Scout
+brief as `instructions`. Scout uses Hermes's `web_search` tool and returns a single
+JSON object of source candidates, which DARE parses into staging items.
+"""
+
+import json
+import logging
+import re
+
+logger = logging.getLogger(__name__)
+
+SCOUT_BRIEF = """You are Scout, a research source-finder working under the scholar's standards above.
+
+The scholar's request may be informal, terse, or underspecified — that is fine
+and expected. First restate it to yourself as a precise research question that
+preserves their intent (use the project's research question and approved
+knowledge for context), then execute the workflow for that question. Never
+refuse or stall because a request is vague; interpret it generously. The one
+exception: if the request carries no research intent at all (a greeting, small
+talk, a test message), do not search — return {"stagingItems": []} immediately.
+
+Workflow — search first, then READ before you stage:
+1. SEARCH. Use the scholar's connected research MCP tools (e.g. consensus__search,
+   scite__search_literature) and/or web_search to find real, relevant sources for
+   the task. Credentialed results may already be provided in the input — use them.
+   PRIORITIZE peer-reviewed scholarly results (Scite, Consensus) over generic web
+   snippets, and draw candidates from EVERY scholarly tool that returned results,
+   not just one. Run AT MOST %(max_searches)d search calls total.
+2. READ before you stage. Fetch a promising source's page with the `fetch_page`
+   MCP tool (for papers, the DOI link: https://doi.org/<doi>) and quote the
+   fetched text in `citationContext`. If the full text cannot be fetched
+   (paywall, fetch error) but the credentialed results gave you the paper's
+   abstract, you MAY ground `citationContext` in that published abstract — it
+   is the authors' own summary, not a search snippet — and judge the evidence
+   from it. Only fall to `evidenceLabel: "unverifiable"` with low confidence
+   when you have neither fetched text nor an abstract. Fetch AT MOST
+   %(max_candidates)d pages; prefer fetch_page over any browser or extract tool.
+3. Never fabricate — only include sources you actually found, with bibliographic
+   details exactly as published, including `doi` whenever known.
+
+Return ONLY a single JSON object — no prose, no markdown code fences — shaped exactly:
+{"stagingItems": [
+  {
+    "title": "string",
+    "authors": "string, semicolon-separated",
+    "year": 2024,
+    "venue": "string",
+    "doi": "string or empty",
+    "url": "string",
+    "rationale": "why this source matters for the task",
+    "confidence": 0.0,
+    "confidenceRationale": "why this confidence level",
+    "evidenceLabel": "supporting | disputing | partial | tangential | unverifiable",
+    "citationContext": "a short relevant quote/context when available",
+    "sourceTool": "which search surfaced this candidate: scite | consensus | web"
+  }
+]}
+Stage as many genuinely relevant sources as the evidence justifies, up to
+%(max_candidates)d — do not pad to reach the cap, and do not drop a strong
+source just to stay short. `confidence` is a number from 0.0 to 1.0."""
+
+
+def build_scout_instructions(
+    soul_content, max_candidates=4, max_searches=4, allowed_tools=None
+):
+    """Compose the run instructions: the soul file (standards) + the Scout brief."""
+    parts = []
+    if soul_content and soul_content.strip():
+        parts.append("# Research standards (soul file)\n" + soul_content.strip())
+    parts.append(
+        SCOUT_BRIEF % {"max_candidates": max_candidates, "max_searches": max_searches}
+    )
+    if allowed_tools:
+        # Prompt-level scoping: the gateway still exposes the scholar's whole
+        # toolbox (per-project gateway credentials are the structural fix), so
+        # the run names its permitted slice explicitly.
+        scoped = ", ".join(f"mcp_dare_{t}__*" for t in allowed_tools)
+        parts.append(
+            "TOOLS FOR THIS RUN: web_search, mcp_dare_fetch_page, and these "
+            f"research tools only: {scoped}. Do not call any other mcp_dare_* "
+            "tool — others may be visible but are out of scope for this run."
+        )
+    return "\n\n".join(parts)
+
+
+def find_json_object(text, required_key=None):
+    """
+    Scan for the first complete JSON object in `text` (optionally one that has
+    `required_key`), tolerating prose around it AND trailing garbage after it —
+    models sometimes echo the contract template after the real object, which
+    breaks whole-string parsing and any greedy first-{-to-last-} match.
+    """
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    fallback = None
+    while index != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(obj, dict):
+            if required_key is None or required_key in obj:
+                return obj
+            if fallback is None:
+                fallback = obj
+        index = text.find("{", index + 1)
+    return fallback
+
+
+def _scan_objects(text):
+    """Yield every complete JSON object found anywhere in `text`."""
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    while index != -1:
+        try:
+            obj, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        yield obj
+        index = text.find("{", end)
+
+
+def parse_staging_items(output):
+    """
+    Extract the `stagingItems` array from Scout's output, tolerating stray prose,
+    markdown fences, and trailing junk. Returns a list of dicts (empty if
+    nothing parseable).
+    """
+    if not output:
+        return []
+    text = output.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?", "", text).strip()
+        text = re.sub(r"```$", "", text).strip()
+
+    data = find_json_object(text, required_key="stagingItems")
+    if isinstance(data, dict) and "stagingItems" in data:
+        items = data.get("stagingItems", [])
+        return (
+            [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+        )
+
+    # Salvage: a malformed envelope (e.g. the model never closed the outer
+    # brace) still contains complete, individually-parseable item objects.
+    if '"stagingItems"' in text:
+        items = [
+            o
+            for o in _scan_objects(text)
+            if isinstance(o, dict) and o.get("title") and "stagingItems" not in o
+        ]
+        if items:
+            logger.warning(
+                "Scout envelope was malformed; salvaged %d item(s)", len(items)
+            )
+            return items
+
+    logger.warning("Scout output was not JSON-parseable")
+    return []
