@@ -323,6 +323,11 @@ class GatewayFetch(BaseModel):
     content = models.TextField(
         help_text="Complete, untrimmed response text",
     )
+    error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Failure reason when the gateway call errored (blank on success)",
+    )
 
     all_objects = models.Manager()
     active_objects = ActiveObjectsManager()

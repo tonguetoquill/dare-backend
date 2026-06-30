@@ -16,7 +16,7 @@ from asgiref.sync import async_to_sync
 
 from mcp.models import GatewayFetch, UserMCPConnection
 from mcp.services.mcp_tool_executor import mcp_tool_executor
-from mcp.services.web_fetch import fetch_page
+from mcp.services.web_fetch import fetch_page, web_search
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,32 @@ _SEP = "__"  # namespace separator: <server_slug>__<tool_name>
 
 # DARE-native gateway tools — available to every agent regardless of which MCP
 # servers the user connected. No namespace prefix (they're the gateway's own).
+# DARE-owned and audited, they run on DARE's API key (not the agent runtime's
+# web tooling), so search + read never depend on the runtime's tools or billing.
 _BUILTIN_TOOL_DEFS = [
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web and return a list of result links (title + URL). "
+            "Prefer this over any runtime/native web_search tool. Then read the "
+            "best results with fetch_page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"}
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "fetch_page",
         "description": (
-            "Fetch a web page (article, abstract, paper landing page) and "
-            "return its readable text. Fast — prefer this over any browser or "
-            "extract tool for reading links found by search tools."
+            "Read ONE article/abstract/paper page and return its readable text. "
+            "Pass a single 'url' (an article URL, e.g. from web_search results). "
+            "Do NOT pass a search-engine results URL (Google/Scholar/DuckDuckGo) "
+            "— use web_search to find pages, then fetch_page to read them. Prefer "
+            "this over any browser or extract tool."
         ),
         "inputSchema": {
             "type": "object",
@@ -44,32 +63,28 @@ _BUILTIN_TOOL_DEFS = [
 ]
 
 _BUILTIN_HANDLERS = {
+    "web_search": lambda user, arguments: web_search(str(arguments.get("query") or "")),
     "fetch_page": lambda user, arguments: fetch_page(str(arguments.get("url") or "")),
 }
 
 
 def list_user_tools(user):
-    """Namespaced tool definitions from the user's active connections."""
-    tools = list(_BUILTIN_TOOL_DEFS)
-    connections = UserMCPConnection.all_objects.filter(
-        user=user, is_active=True, is_deleted=False
-    ).select_related("server")
-    for conn in connections:
-        slug = conn.server.slug
-        for tool in conn.cached_tools or []:
-            name = tool.get("name")
-            if not name:
-                continue
-            tools.append(
-                {
-                    "name": f"{slug}{_SEP}{name}",
-                    "description": tool.get("description", "") or "",
-                    "inputSchema": tool.get("inputSchema")
-                    or tool.get("input_schema")
-                    or {"type": "object"},
-                }
-            )
-    return tools
+    """Tool definitions exposed to a delegated agent over the live gateway.
+
+    Tenant isolation (Path B): a live gateway call carries no project/run/owner
+    identity — Hermes forwards none — so the gateway cannot safely decide whose
+    credentials a `<server>__<tool>` call should use. It would fall back to the
+    shared service-user's credentials, leaking one tenant's tools to another.
+
+    So the live gateway exposes ONLY DARE-owned, credential-free builtins
+    (fetch_page). User-credentialed research tools (Consensus, Scite, Scholar)
+    are never exposed here; DARE runs them server-side under the project owner
+    (`gather_tool_results(run.user, …)`) and injects their results into the run.
+
+    `user` is accepted for signature stability but intentionally unused — the
+    live surface is identity-independent by design.
+    """
+    return list(_BUILTIN_TOOL_DEFS)
 
 
 def _doi_from_url(url):
@@ -107,6 +122,24 @@ def _capture_fetch(user, tool, content, arguments):
             )
     except Exception:  # noqa: BLE001 - capture is best-effort by design
         logger.exception("Gateway fetch capture failed for %s", tool)
+
+
+def _capture_error(user, tool, error, arguments):
+    """Persist a gateway call's failure reason so the run audit can show WHY a
+    mcp_dare_* tool failed (paywall / auth / rate-limit), not merely that it did.
+    Capture must never break the call it records."""
+    if not error:
+        return
+    try:
+        GatewayFetch.all_objects.create(
+            user=user,
+            tool=tool,
+            arguments=arguments,
+            content="",
+            error=str(error)[:1000],
+        )
+    except Exception:  # noqa: BLE001 - capture is best-effort by design
+        logger.exception("Gateway error capture failed for %s", tool)
 
 
 def _result_text(result):
@@ -301,6 +334,7 @@ def _handle_tool_call(user, rpc_id, params):
             # moves on, and the run audit records an honest failed tool call —
             # never a false success with a refusal passed off as content.
             logger.info("MCP gateway builtin %s failed: %s", name, exc)
+            _capture_error(user, name, str(exc), arguments)
             return _result(
                 rpc_id,
                 {"content": [{"type": "text", "text": str(exc)}], "isError": True},
@@ -310,22 +344,34 @@ def _handle_tool_call(user, rpc_id, params):
 
     if _SEP not in name:
         return _error(rpc_id, -32602, f"Unknown tool: {name!r}")
-    server_slug, tool_name = name.split(_SEP, 1)
-    try:
-        result = async_to_sync(mcp_tool_executor.execute_tool_call)(
-            user, server_slug, tool_name, arguments
-        )
-    except Exception as exc:  # noqa: BLE001 - surface as a tool error
-        logger.warning("MCP gateway tool %s failed: %s", name, exc)
-        return _error(rpc_id, -32000, str(exc))
 
-    # The executor returns the tool result; normalise to MCP content.
-    if not (isinstance(result, dict) and result.get("isError")):
-        _capture_fetch(user, name, _result_text(result).strip(), arguments)
-    if isinstance(result, dict) and "content" in result:
-        return _result(rpc_id, result)
-    text = result if isinstance(result, str) else json.dumps(result)
-    return _result(rpc_id, {"content": [{"type": "text", "text": text}]})
+    # Tenant isolation (Path B): a namespaced, user-credentialed tool reached
+    # the live gateway, which has no identity to resolve the owner. Refuse it
+    # rather than fall back to the shared service-user's credentials (a
+    # cross-tenant leak). DARE runs these server-side under the project owner
+    # and provides the results in the run input. Returned as isError so the
+    # agent reads the reason and continues, and the audit records an honest
+    # refusal — never a false success.
+    logger.info("MCP gateway refused credentialed tool %s (server-side only)", name)
+    _capture_error(
+        user, name, "credentialed tool not available on the live gateway", arguments
+    )
+    return _result(
+        rpc_id,
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"{name} cannot be called here. The scholar's "
+                        "research-tool results are already in your input — use "
+                        "those, and read pages with fetch_page."
+                    ),
+                }
+            ],
+            "isError": True,
+        },
+    )
 
 
 def handle_jsonrpc(user, payload):
