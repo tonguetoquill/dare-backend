@@ -42,6 +42,26 @@ class FetchError(Exception):
     """A page genuinely could not be fetched (paywall, block, fetch error)."""
 
 
+# Anthropic web_fetch error codes -> plain, honest reasons. The wording makes
+# clear the failure is THIS page (paywall / block / 404), not a DARE or tool
+# outage, so the agent reports it accurately instead of "the tool is down".
+_FETCH_REASONS = {
+    "url_not_accessible": "the page is blocked, paywalled, or refused the reader",
+    "unavailable": "the page is unavailable (paywall, removed, or 404)",
+    "too_many_requests": "the site rate-limited the reader",
+    "max_uses_exceeded": "the page-fetch budget for this run was reached",
+    "unsupported_content_type": "the page is not a readable document",
+    "url_not_allowed": "the URL is not on the allowed list",
+    "url_too_long": "the URL is too long to fetch",
+    "invalid_input": "the URL was rejected as invalid",
+}
+
+
+def _fetch_reason(code):
+    """A plain-language reason for an Anthropic web_fetch error code."""
+    return _FETCH_REASONS.get(code, f"the reader could not retrieve it ({code})")
+
+
 def _fetch_result(message):
     """The web_fetch tool-result block as a plain dict, or None. Dicts (via
     model_dump) navigate reliably across SDK versions; nested SDK attribute
@@ -127,12 +147,18 @@ def fetch_page(url):
 
     content = result.get("content") or {}
     if content.get("type") == "web_fetch_tool_error":
-        # Anthropic's own failure signal — surface it, never the apology text.
+        # Anthropic's own failure signal — surface it as a typed, honest reason so
+        # the agent reports "this page is paywalled/blocked", never "tool is down".
+        code = content.get("error_code", "unavailable")
         raise FetchError(
-            f"Could not fetch {url}: {content.get('error_code', 'unavailable')}."
+            f"Could not read {url} — {_fetch_reason(code)} (this page only, not a "
+            "tool or system error; try a different source)."
         )
 
     text = _document_text(result)
     if not text:
-        raise FetchError(f"Fetched {url} but found no readable text.")
+        raise FetchError(
+            f"Reached {url} but found no readable text — likely a login wall or a "
+            "script-only page (this page only, not a tool error)."
+        )
     return text[:MAX_CHARS]

@@ -109,6 +109,24 @@ def _capture_fetch(user, tool, content, arguments):
         logger.exception("Gateway fetch capture failed for %s", tool)
 
 
+def _capture_error(user, tool, error, arguments):
+    """Persist a gateway call's failure reason so the run audit can show WHY a
+    mcp_dare_* tool failed (paywall / auth / rate-limit), not merely that it did.
+    Capture must never break the call it records."""
+    if not error:
+        return
+    try:
+        GatewayFetch.all_objects.create(
+            user=user,
+            tool=tool,
+            arguments=arguments,
+            content="",
+            error=str(error)[:1000],
+        )
+    except Exception:  # noqa: BLE001 - capture is best-effort by design
+        logger.exception("Gateway error capture failed for %s", tool)
+
+
 def _result_text(result):
     """Flatten an MCP tool result into plain text (content blocks or JSON)."""
     if isinstance(result, dict):
@@ -301,6 +319,7 @@ def _handle_tool_call(user, rpc_id, params):
             # moves on, and the run audit records an honest failed tool call —
             # never a false success with a refusal passed off as content.
             logger.info("MCP gateway builtin %s failed: %s", name, exc)
+            _capture_error(user, name, str(exc), arguments)
             return _result(
                 rpc_id,
                 {"content": [{"type": "text", "text": str(exc)}], "isError": True},
@@ -317,11 +336,14 @@ def _handle_tool_call(user, rpc_id, params):
         )
     except Exception as exc:  # noqa: BLE001 - surface as a tool error
         logger.warning("MCP gateway tool %s failed: %s", name, exc)
+        _capture_error(user, name, str(exc), arguments)
         return _error(rpc_id, -32000, str(exc))
 
     # The executor returns the tool result; normalise to MCP content.
     if not (isinstance(result, dict) and result.get("isError")):
         _capture_fetch(user, name, _result_text(result).strip(), arguments)
+    else:
+        _capture_error(user, name, _result_text(result).strip(), arguments)
     if isinstance(result, dict) and "content" in result:
         return _result(rpc_id, result)
     text = result if isinstance(result, str) else json.dumps(result)

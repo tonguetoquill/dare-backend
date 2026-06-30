@@ -22,6 +22,7 @@ from research.models import (
     ResearchAgentToolCall,
     ResearchArtifact,
     ResearchKnowledgeItem,
+    ResearchProjectMemory,
     ResearchStagingItem,
     SoulFile,
 )
@@ -100,6 +101,15 @@ def _knowledge_block(project, per_item_chars=300, max_items=12):
     return "\n".join(lines)
 
 
+def _project_memory_block(project, max_items=20, per_item_chars=400):
+    """The project's durable memory (working theses, decisions, open questions) —
+    DARE-owned and per-project, injected per run so the agent carries it across
+    sessions. Scoped to this project, so it never leaks into another one."""
+    items = ResearchProjectMemory.active_objects.filter(project=project)[:max_items]
+    lines = [f"- {m.label}: {(m.detail or '').strip()[:per_item_chars]}" for m in items]
+    return "\n".join(lines)
+
+
 def _start_run(hermes, run, input_text, instructions):
     """
     Start the Hermes run and record its id. Each delegated run gets a fresh
@@ -156,22 +166,21 @@ def _token_count(text):
     return len(text) // 4
 
 
-def _match_gateway_fetch(run, tool):
+def _match_gateway_fetch(run, tool, want_error=False):
     """The GatewayFetch this agent gateway call produced — matched by user and
     normalised tool name, taking the most recent one in the run's window. The
     gateway captures the full response (the event stream carries only the tool
-    name), so this is how a `mcp_dare_*` call gets its result and token size.
-    Returns None for native tools (web_search) that never touch the gateway."""
+    name and a pass/fail bit), so this is how a `mcp_dare_*` call gets its result
+    or, with want_error, the real failure reason it hit. Returns None for native
+    tools (web_search) that never touch the gateway."""
     if not tool.startswith(_GATEWAY_PREFIX):
         return None
     base = tool[len(_GATEWAY_PREFIX) :]
-    return (
-        GatewayFetch.all_objects.filter(
-            user=run.user, tool=base, created_at__gte=run.started_at
-        )
-        .order_by("-created_at")
-        .first()
+    qs = GatewayFetch.all_objects.filter(
+        user=run.user, tool=base, created_at__gte=run.started_at
     )
+    qs = qs.exclude(error="") if want_error else qs.filter(error="")
+    return qs.order_by("-created_at").first()
 
 
 def _record_tool_call(run, event, arguments):
@@ -182,12 +191,17 @@ def _record_tool_call(run, event, arguments):
     tool = event.get("tool", "")
     raw_error = event.get("error")
     error = bool(raw_error)
-    # The stream flags failure as a boolean; keep only a real string message.
+    # The stream flags failure as a boolean; keep any real string message.
     error_text = raw_error if isinstance(raw_error, str) else ""
-    # Link the gateway result only for a successful call — a failed fetch
-    # captures nothing, so matching would borrow a neighbouring call's row.
     result_summary = ""
-    if not error:
+    if error:
+        # The gateway ran the tool and captured WHY it failed (paywall / auth /
+        # rate-limit); link it so the audit shows the reason, not a bare flag.
+        if not error_text:
+            failed = _match_gateway_fetch(run, tool, want_error=True)
+            if failed:
+                error_text = failed.error
+    else:
         fetch = _match_gateway_fetch(run, tool)
         if fetch:
             result_summary = fetch.content
@@ -296,6 +310,36 @@ def _reask_json(hermes, run, expectation):
                 break
     except Exception as exc:  # noqa: BLE001
         logger.warning("Corrective re-ask stream failed: %s", exc)
+    return "".join(chunks)
+
+
+def _finalize_at_budget(hermes, run):
+    """At the run budget: instead of stopping cold with nothing, ask the agent to
+    write its final answer NOW from what it already gathered — no more searching or
+    reading. Salvages a real result rather than failing empty. Best-effort."""
+    try:
+        started = hermes.start_run(
+            input_text=(
+                "You have reached this run's time/tool budget — do NOT search, "
+                "read, or call any tool again. Using ONLY the sources you have "
+                'already gathered in this session, return your final {"stagingItems": '
+                "[...]} object now — a single JSON object, no prose, no markdown fences."
+            ),
+            instructions="",
+            session_id=f"{run.session.hermes_session_id}-r{run.id}",
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort salvage
+        logger.warning("Budget finalize could not start: %s", exc)
+        return ""
+    chunks = []
+    try:
+        for event in hermes.stream_events(started["run_id"]):
+            if event.get("event") == "message.delta":
+                chunks.append(event.get("delta", ""))
+            elif event.get("event") == "run.completed":
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Budget finalize stream failed: %s", exc)
     return "".join(chunks)
 
 
@@ -414,7 +458,7 @@ def run_scout_job(run_id):
         return
 
     soul, version, soul_content = _project_soul(run.project)
-    hermes = get_hermes_service()
+    hermes = get_hermes_service(run.project)
     hermes.provision_soul(soul_content)
 
     _set_status(run, "Querying research tools…")
@@ -450,7 +494,12 @@ def run_scout_job(run_id):
 
     _set_status(run, "Evaluating findings…")
     items = parse_staging_items(output)
-    if not items and output.strip() and not stopped:
+    if not items and stopped:
+        # Hit the budget mid-work — don't end empty. Force one final synthesis
+        # from what was already gathered (no further searching or reading).
+        _set_status(run, "At the budget — writing up final findings…")
+        items = parse_staging_items(_finalize_at_budget(hermes, run))
+    elif not items and output.strip():
         _set_status(run, "Repairing the result format…")
         items = parse_staging_items(
             _reask_json(
@@ -461,11 +510,13 @@ def run_scout_job(run_id):
 
     plural = "s" if staged != 1 else ""
     if stopped:
-        # Budget-stopped runs salvage what was gathered; only a fully empty
-        # salvage counts as failure.
+        # Budget hit: we forced a final synthesis above, so the run delivers what
+        # it gathered rather than failing empty. Only a truly empty result fails.
         detail = (
-            f"Stopped at the run budget ({stopped}) — "
-            f"staged {staged} finding{plural} from what was gathered."
+            f"Reached the run budget ({stopped}); finalized with "
+            f"{staged} finding{plural} from what was gathered."
+            if staged
+            else f"Reached the run budget ({stopped}); could not finalize a finding."
         )
         _finish(run, detail, hermes, failed=not staged)
     elif staged == 0:
@@ -501,7 +552,7 @@ def run_critic_job(run_id, item_id):
         return
 
     _, _, soul_content = _project_soul(item.project)
-    hermes = get_hermes_service()
+    hermes = get_hermes_service(run.project)
     hermes.provision_soul(soul_content)
 
     _set_status(run, "Reading the source…")
@@ -561,7 +612,7 @@ def run_artifact_job(run_id):
         return
 
     _, _, soul_content = _project_soul(run.project)
-    hermes = get_hermes_service()
+    hermes = get_hermes_service(run.project)
     hermes.provision_soul(soul_content)
 
     artifact_input = run.task

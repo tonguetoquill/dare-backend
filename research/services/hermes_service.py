@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 class HermesService:
     """REST client for the Hermes gateway (drive + SSE stream)."""
 
-    def __init__(self):
-        self.base_url = settings.HERMES_GATEWAY_URL.rstrip("/")
-        self.api_key = settings.HERMES_API_KEY
+    def __init__(self, base_url=None, api_key=None):
+        self.base_url = (base_url or settings.HERMES_GATEWAY_URL).rstrip("/")
+        self.api_key = api_key or settings.HERMES_API_KEY
 
     def _headers(self, *, json_body=False):
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -165,8 +165,16 @@ class HermesService:
 _hermes_service = None
 
 
-def get_hermes_service():
-    """Return the shared HermesService instance."""
+def get_hermes_service(project=None):
+    """Return a HermesService for ``project`` — its own per-project Hermes endpoint
+    when one is provisioned, else the shared default instance. A per-project
+    endpoint (one gateway per project) is how DARE keeps each project's agent
+    memory and credentials separate; with none set this is behaviour-neutral and
+    returns the shared default."""
+    base = getattr(project, "hermes_base_url", "") if project else ""
+    if base:
+        key = getattr(project, "hermes_api_key", "") or settings.HERMES_API_KEY
+        return HermesService(base_url=base, api_key=key)
     global _hermes_service
     if _hermes_service is None:
         _hermes_service = HermesService()

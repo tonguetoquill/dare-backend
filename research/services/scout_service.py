@@ -38,7 +38,8 @@ Workflow — search first, then READ before you stage:
    is the authors' own summary, not a search snippet — and judge the evidence
    from it. Only fall to `evidenceLabel: "unverifiable"` with low confidence
    when you have neither fetched text nor an abstract. Fetch AT MOST
-   %(max_candidates)d pages; prefer fetch_page over any browser or extract tool.
+   %(max_candidates)d pages, and read a page ONLY with `fetch_page` (mcp_dare_fetch_page)
+   — never `web_extract` or a browser tool, which bypass DARE's audited gateway.
 3. Never fabricate — only include sources you actually found, with bibliographic
    details exactly as published, including `doi` whenever known.
 

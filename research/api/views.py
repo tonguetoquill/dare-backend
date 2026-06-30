@@ -46,6 +46,8 @@ from research.services import get_hermes_service
 from research.services.graph_service import build_evidence_graph
 from research.tasks import (
     _knowledge_block,
+    _match_gateway_fetch,
+    _project_memory_block,
     run_artifact_job,
     run_critic_job,
     run_scout_job,
@@ -110,12 +112,33 @@ CHAT_BRIEF = (
     "renderable artifact (a diagram, deck, document, or figure), give at most "
     "a brief sketch of what it could contain and point them to the Artifacts "
     "tab, which generates and saves artifacts properly — do not paste large "
-    "artifact payloads into the chat."
+    "artifact payloads into the chat. "
+    "Be honest about tool failures: if a tool errors, tell the scholar plainly "
+    "what failed and why (quota exhausted, auth, not found, blocked/paywalled) "
+    "instead of guessing or blaming the wrong layer, and do not retry a tool "
+    "that returned a quota or auth error — switch approaches or say what you need."
 )
 
 
-def _chat_instructions(project, soul_content):
-    """Soul + chat framing + the project's context (question, approved record)."""
+def _recent_transcript(session, max_turns=12, max_chars=6000):
+    """The running chat transcript (prior turns) so the agent has verbatim memory
+    of THIS conversation. DARE owns the history, so we replay it rather than trust
+    the runtime's session summary, which drops specifics (the amnesia root cause)."""
+    msgs = list(
+        ResearchChatMessage.active_objects.filter(session=session).order_by(
+            "-created_at"
+        )[:max_turns]
+    )
+    msgs.reverse()
+    lines = [
+        f"{'Scholar' if m.role == ChatMessageRole.USER else 'You'}: {m.content}"
+        for m in msgs
+    ]
+    return "\n\n".join(lines)[-max_chars:]
+
+
+def _chat_instructions(project, soul_content, history=""):
+    """Soul + chat framing + project context + the running conversation transcript."""
     parts = [soul_content] if soul_content else []
     parts.append(CHAT_BRIEF)
     context = []
@@ -126,6 +149,19 @@ def _chat_instructions(project, soul_content):
         context.append(f"The scholar's approved project knowledge so far:\n{knowledge}")
     if context:
         parts.append("# Project context\n" + "\n\n".join(context))
+    memory = _project_memory_block(project)
+    if memory:
+        parts.append(
+            "# Project memory (durable, DARE-owned — your persistent memory for "
+            "THIS project across sessions; rely on it)\n" + memory
+        )
+    if history:
+        parts.append(
+            "# Conversation so far (oldest first, most recent last)\n"
+            "This is the running transcript of THIS chat — it is your memory of the "
+            "conversation. Refer to it directly; never claim the chat just began.\n\n"
+            + history
+        )
     return "\n\n".join(parts)
 
 
@@ -170,6 +206,9 @@ class ResearchChatView(APIView):
             )
 
         session = ResearchSession.get_or_create_chat_session(project, request.user)
+        # Capture the prior turns BEFORE recording this new message, so the agent
+        # gets verbatim conversation memory (fixes the "this chat just began" amnesia).
+        history = _recent_transcript(session)
         soul = SoulFile.active_objects.filter(project=project).first()
         soul_version = soul.current_version() if soul else None
         soul_content = soul_version.content if soul_version else ""
@@ -194,26 +233,36 @@ class ResearchChatView(APIView):
             content=message,
         )
 
-        hermes = get_hermes_service()
+        hermes = get_hermes_service(project)
         # Anchor: write DARE's soul into the gateway SOUL.md (read fresh each
         # run); instructions remain a resilient fallback overlay.
         hermes.provision_soul(soul_content)
         try:
             started = hermes.start_run(
                 input_text=message,
-                instructions=_chat_instructions(project, soul_content),
+                instructions=_chat_instructions(project, soul_content, history=history),
                 session_id=session.hermes_session_id,
                 session_key=f"dare-proj{project.id}",
             )
             hermes_run_id = started["run_id"]
+            logger.info(
+                "research.chat run %s started: project=%s session=%s "
+                "prior_turns=%s msg_chars=%s hermes_run=%s",
+                run.id,
+                project.id,
+                session.id,
+                (history.count("\n\n") + 1 if history else 0),
+                len(message),
+                hermes_run_id,
+            )
         except Exception as exc:  # noqa: BLE001 - surface as a failed run
-            logger.error("Hermes start_run failed: %s", exc)
+            logger.error("research.chat run %s start_run failed: %s", run.id, exc)
             run.status = AgentRunStatus.FAILED
             run.error = str(exc)
             run.completed_at = timezone.now()
             run.save(update_fields=["status", "error", "completed_at", "updated_at"])
             return Response(
-                {"error": "Could not reach the agent runtime."},
+                {"error": f"Could not start the agent run: {exc}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -240,16 +289,41 @@ class ResearchChatView(APIView):
                         )
                     elif event_type == "tool.completed":
                         duration = event.get("duration")
+                        tool_name = event.get("tool", "")
+                        raw_error = event.get("error")
+                        is_error = bool(raw_error)
+                        # SSE flags failure as a boolean; the gateway captured the
+                        # real reason (paywall/auth) and the result body — link both.
+                        error_text = raw_error if isinstance(raw_error, str) else ""
+                        result_summary = ""
+                        if is_error and not error_text:
+                            failed = _match_gateway_fetch(
+                                run, tool_name, want_error=True
+                            )
+                            if failed:
+                                error_text = failed.error
+                        elif not is_error:
+                            fetch = _match_gateway_fetch(run, tool_name)
+                            if fetch:
+                                result_summary = fetch.content[:2000]
                         ResearchAgentToolCall.objects.create(
                             run=run,
-                            tool=event.get("tool", ""),
+                            tool=tool_name,
                             status=(
                                 AgentToolCallStatus.ERROR
-                                if event.get("error")
+                                if is_error
                                 else AgentToolCallStatus.SUCCESS
                             ),
                             duration_ms=(int(duration * 1000) if duration else None),
-                            error=event.get("error") or "",
+                            result_summary=result_summary,
+                            error=error_text,
+                        )
+                        logger.info(
+                            "research.chat run %s tool %s -> %s%s",
+                            run.id,
+                            tool_name,
+                            "error" if is_error else "ok",
+                            f" ({error_text[:120]})" if error_text else "",
                         )
                         yield _sse(
                             {
@@ -261,7 +335,12 @@ class ResearchChatView(APIView):
                     elif event_type == "run.completed":
                         break
             except Exception as exc:  # noqa: BLE001 - mark the run failed
-                logger.error("Hermes stream failed for run %s: %s", run.id, exc)
+                logger.error(
+                    "research.chat run %s stream failed: %s",
+                    run.id,
+                    exc,
+                    exc_info=True,
+                )
                 run.status = AgentRunStatus.FAILED
                 run.error = str(exc)
                 run.completed_at = timezone.now()
@@ -269,7 +348,7 @@ class ResearchChatView(APIView):
                     update_fields=["status", "error", "completed_at", "updated_at"]
                 )
                 yield _sse(
-                    {"type": "error", "error": "The agent stream was interrupted."}
+                    {"type": "error", "error": f"The agent stream failed: {exc}"}
                 )
                 return
 
@@ -285,6 +364,12 @@ class ResearchChatView(APIView):
             run.completed_at = timezone.now()
             run.usage = hermes.fetch_usage(hermes_run_id)
             run.save(update_fields=["status", "completed_at", "usage", "updated_at"])
+            logger.info(
+                "research.chat run %s completed: reply_chars=%s usage=%s",
+                run.id,
+                len("".join(chunks)),
+                run.usage,
+            )
             session.last_run_at = timezone.now()
             session.save(update_fields=["last_run_at", "updated_at"])
             yield _sse(

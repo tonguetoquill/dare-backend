@@ -73,6 +73,14 @@ class ResearchProject(BaseModel):
         blank=True,
         help_text="Soul-file starter template chosen at creation (e.g. 'research-ethics').",
     )
+    hermes_base_url = models.URLField(
+        blank=True,
+        default="",
+        help_text=(
+            "Per-project Hermes gateway URL (its own profile = isolated agent "
+            "memory + the owner's tools). Blank uses the shared default gateway."
+        ),
+    )
 
     objects = models.Manager()
     active_objects = ActiveObjectsManager()
