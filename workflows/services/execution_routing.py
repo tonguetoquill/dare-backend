@@ -27,11 +27,21 @@ def should_execute(
     if not incoming:
         return True
 
-    # For structuredOutput: execute if any predecessor not skipped
+    # For structuredOutput: execute if any predecessor is not skipped.
+    # Bridge chatOutput pass-throughs to their source step, matching the
+    # regular-node path below — otherwise the canonical
+    # `step -> chatOutput -> router` wiring skips the router, since a
+    # chatOutput is non-executable and never appears in node_results.
     if node.type == 'structuredOutput':
         for e in incoming:
-            if e.source in node_results:
-                result = node_results[e.source]
+            source_id = e.source
+            if graph.type_map.get(source_id) == NodeType.CHAT_OUTPUT:
+                source_id = next(
+                    (pe.source for pe in graph.edge_map_by_target.get(e.source, [])),
+                    None,
+                )
+            if source_id and source_id in node_results:
+                result = node_results[source_id]
                 is_skipped = result.metadata and result.metadata.get('skipped')
                 if not is_skipped:
                     return True
