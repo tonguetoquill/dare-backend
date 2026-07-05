@@ -95,7 +95,7 @@ def _doi_from_url(url):
     return ""
 
 
-def _capture_fetch(user, tool, content, arguments, run_key=""):
+def _capture_fetch(user, tool, content, arguments, run_key="", call_id=""):
     """
     Persist the complete response of a gateway-served call (the agent's reading
     corpus). Page fetches dedup by URL; everything else is one row per call.
@@ -115,6 +115,7 @@ def _capture_fetch(user, tool, content, arguments, run_key=""):
                     "arguments": arguments,
                     "content": content,
                     "run_key": run_key,
+                    "call_id": call_id,
                     "error": "",
                 },
             )
@@ -125,12 +126,13 @@ def _capture_fetch(user, tool, content, arguments, run_key=""):
                 arguments=arguments,
                 content=content,
                 run_key=run_key,
+                call_id=call_id,
             )
     except Exception:  # noqa: BLE001 - capture is best-effort by design
         logger.exception("Gateway fetch capture failed for %s", tool)
 
 
-def _capture_error(user, tool, error, arguments, run_key=""):
+def _capture_error(user, tool, error, arguments, run_key="", call_id=""):
     """Persist a gateway call's failure reason so the run audit can show WHY a
     mcp_dare_* tool failed (paywall / auth / rate-limit), not merely that it did.
     Records the URL too, so the audit names the page that failed. Capture must
@@ -148,6 +150,7 @@ def _capture_error(user, tool, error, arguments, run_key=""):
             content="",
             error=str(error)[:1000],
             run_key=run_key,
+            call_id=call_id,
         )
     except Exception:  # noqa: BLE001 - capture is best-effort by design
         logger.exception("Gateway error capture failed for %s", tool)
@@ -336,6 +339,13 @@ def _handle_tool_call(user, rpc_id, params, run_key=""):
     """Route one tools/call to a gateway builtin or the user's tool executor."""
     name = params.get("name", "")
     arguments = params.get("arguments") or {}
+    # Per-call run attribution: the MCP standard `_meta` field is the only thing
+    # that varies per tool call on a shared connection (a header can't), so the
+    # runtime forwards the run/session id there. Prefer it; fall back to the
+    # header-derived run_key, then to the time-window match downstream.
+    meta = params.get("_meta") or {}
+    run_key = str(meta.get("dareRun") or "") or run_key
+    call_id = str(meta.get("dareCall") or "")
 
     if name in _BUILTIN_HANDLERS:
         try:
@@ -347,18 +357,18 @@ def _handle_tool_call(user, rpc_id, params, run_key=""):
             # per-server circuit breaker doesn't count healthy per-page misses as
             # an outage. The reason is still captured for the run audit.
             logger.info("MCP gateway builtin %s: %s", name, exc)
-            _capture_error(user, name, str(exc), arguments, run_key)
+            _capture_error(user, name, str(exc), arguments, run_key, call_id)
             return _result(rpc_id, {"content": [{"type": "text", "text": str(exc)}]})
         except Exception as exc:  # noqa: BLE001 - genuine tool/system failure
             # A real malfunction (no API key, upstream API error, bad input) —
             # surface as isError so the audit is honest and the breaker can react.
             logger.info("MCP gateway builtin %s failed: %s", name, exc)
-            _capture_error(user, name, str(exc), arguments, run_key)
+            _capture_error(user, name, str(exc), arguments, run_key, call_id)
             return _result(
                 rpc_id,
                 {"content": [{"type": "text", "text": str(exc)}], "isError": True},
             )
-        _capture_fetch(user, name, text, arguments, run_key)
+        _capture_fetch(user, name, text, arguments, run_key, call_id)
         return _result(rpc_id, {"content": [{"type": "text", "text": text}]})
 
     if _SEP not in name:
@@ -378,6 +388,7 @@ def _handle_tool_call(user, rpc_id, params, run_key=""):
         "credentialed tool not available on the live gateway",
         arguments,
         run_key,
+        call_id,
     )
     return _result(
         rpc_id,

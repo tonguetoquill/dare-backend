@@ -340,6 +340,18 @@ class GatewayFetch(BaseModel):
             "of matching by time window. Blank when not forwarded."
         ),
     )
+    call_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text=(
+            "The agent's tool_use id for this call (forwarded via MCP _meta), "
+            "matched exactly against the same id on the stream's tool.completed "
+            "event — so the audit links each call to its own result, no guessing. "
+            "Blank when not forwarded."
+        ),
+    )
 
     all_objects = models.Manager()
     active_objects = ActiveObjectsManager()

@@ -173,31 +173,44 @@ def _run_session_key(run):
     return f"{run.session.hermes_session_id}-r{run.id}"
 
 
-def _next_gateway_fetch(run, tool, seen_ids):
+def _next_gateway_fetch(run, tool, seen_ids, call_id=""):
     """The GatewayFetch row this streamed gateway call produced, consumed once.
 
     One row is written per gateway call (its content on success, the reason on a
-    page miss). We attribute a streamed tool event to a row by, in order:
-      1. exact run-key match — when the runtime forwards this run's session id;
-      2. else the earliest unconsumed *unattributed* row for this tool in the
+    page miss). We link a streamed tool event to its row by, in order:
+      1. exact tool_use-id match — the stream event and the gateway's `_meta`
+         carry the SAME id, so this is an exact, order- and concurrency-proof
+         join (no guessing);
+      2. else exact run-key match — when only the run/session id is forwarded;
+      3. else the earliest unconsumed *unattributed* row for this tool in the
          run window, tracked via `seen_ids` so N calls map to N rows in order.
 
     The old code always took the most-recent matching row, which mislabelled
     calls that shared a time window (and, when a call wrote no row at all,
     borrowed a different call's reason — the "same URL ×N" audit artifact).
-    Returns None for tools that never touch the gateway. Cross-run bleed is only
-    possible on the untagged fallback path; once the runtime forwards the run
-    key, attribution is exact even under concurrent runs."""
+    Returns None for tools that never touch the gateway."""
     if not tool.startswith(_GATEWAY_PREFIX):
         return None
     base = tool[len(_GATEWAY_PREFIX) :]
-    window = GatewayFetch.all_objects.filter(
-        tool=base, created_at__gte=run.started_at
-    ).exclude(id__in=seen_ids)
-    row = (
-        window.filter(run_key=_run_session_key(run)).order_by("created_at").first()
-        or window.filter(run_key="").order_by("created_at").first()
-    )
+    row = None
+    if call_id:
+        # tool_use ids are globally unique, so match them WITHOUT the time
+        # window — a re-fetched URL de-dups onto an existing (older) row, which
+        # a windowed search would miss.
+        row = (
+            GatewayFetch.all_objects.filter(tool=base, call_id=call_id)
+            .exclude(id__in=seen_ids)
+            .order_by("created_at")
+            .first()
+        )
+    if row is None:
+        window = GatewayFetch.all_objects.filter(
+            tool=base, created_at__gte=run.started_at
+        ).exclude(id__in=seen_ids)
+        row = (
+            window.filter(run_key=_run_session_key(run)).order_by("created_at").first()
+            or window.filter(run_key="").order_by("created_at").first()
+        )
     if row is not None:
         seen_ids.add(row.id)
     return row
@@ -218,7 +231,7 @@ def _record_tool_call(run, event, arguments, seen_ids):
     error_text = raw_error if isinstance(raw_error, str) else ""
     result_summary = ""
 
-    row = _next_gateway_fetch(run, tool, seen_ids)
+    row = _next_gateway_fetch(run, tool, seen_ids, event.get("toolCallId") or "")
     if row is not None:
         if row.url:
             arguments = {**arguments, "url": row.url}
@@ -335,17 +348,43 @@ def _reask_json(hermes, run, expectation):
     return "".join(chunks)
 
 
+def _gathered_corpus(run, max_sources=12, per_source_chars=1500):
+    """A compact digest of the pages this run actually fetched — for injection
+    into the budget-finalize prompt. The finalize runs as a fresh Hermes turn
+    (history=0), so it has NONE of the run's gathered context; handing it the
+    real page excerpts here lets it write findings from content in the prompt
+    rather than from a session memory it doesn't have. Scoped by the run's time
+    window (best-effort); once the tool_use id is on the stream we can scope by
+    run_key exactly."""
+    rows = (
+        GatewayFetch.all_objects.filter(
+            tool="fetch_page", created_at__gte=run.started_at
+        )
+        .exclude(content="")
+        .order_by("created_at")[:max_sources]
+    )
+    parts = [
+        f"### {r.url}\n{(r.content or '').strip()[:per_source_chars]}" for r in rows
+    ]
+    return "\n\n".join(parts)
+
+
 def _finalize_at_budget(hermes, run):
     """At the run budget: instead of stopping cold with nothing, ask the agent to
     write its final answer NOW from what it already gathered — no more searching or
     reading. Salvages a real result rather than failing empty. Best-effort."""
+    corpus = _gathered_corpus(run)
+    if not corpus:
+        # Nothing readable was gathered — no material to salvage a finding from.
+        return ""
     try:
         started = hermes.start_run(
             input_text=(
                 "You have reached this run's time/tool budget — do NOT search, "
-                "read, or call any tool again. Using ONLY the sources you have "
-                'already gathered in this session, return your final {"stagingItems": '
-                "[...]} object now — a single JSON object, no prose, no markdown fences."
+                "read, or call any tool again. Below are the sources you already "
+                "fetched in this run. Using ONLY these, return your final "
+                '{"stagingItems": [...]} object now — a single JSON object, no '
+                "prose, no markdown fences.\n\n# Sources you gathered\n" + corpus
             ),
             instructions="",
             session_id=f"{run.session.hermes_session_id}-r{run.id}",
