@@ -166,57 +166,87 @@ def _token_count(text):
     return len(text) // 4
 
 
-def _match_gateway_fetch(run, tool, want_error=False):
-    """The GatewayFetch this agent gateway call produced — matched by normalised
-    tool name within the run's window, most recent first (its result, or with
-    want_error the real failure reason). Returns None for native tools
-    (web_search) that never touch the gateway.
+def _run_session_key(run):
+    """The Hermes session id DARE assigned this run (see `_start_run`) — the
+    value the runtime forwards as X-DARE-Run-Session so gateway rows can be
+    attributed to this exact run."""
+    return f"{run.session.hermes_session_id}-r{run.id}"
 
-    We deliberately do NOT filter by run.user: the live gateway authenticates as
-    the shared service account (Hermes opens one global MCP connection and
-    forwards no per-run identity), so these rows are stored under THAT account,
-    not the project owner — filtering by run.user silently dropped every reason
-    in multi-user runs (the empty-red bug). Scoping is best-effort by time
-    window; the gateway builtins are DARE-owned public fetches, so a rare
-    cross-run match only changes which reason the audit shows, never tool
-    execution or credentials."""
+
+def _next_gateway_fetch(run, tool, seen_ids, call_id=""):
+    """The GatewayFetch row this streamed gateway call produced, consumed once.
+
+    One row is written per gateway call (its content on success, the reason on a
+    page miss). We link a streamed tool event to its row by, in order:
+      1. exact tool_use-id match — the stream event and the gateway's `_meta`
+         carry the SAME id, so this is an exact, order- and concurrency-proof
+         join (no guessing);
+      2. else exact run-key match — when only the run/session id is forwarded;
+      3. else the earliest unconsumed *unattributed* row for this tool in the
+         run window, tracked via `seen_ids` so N calls map to N rows in order.
+
+    The old code always took the most-recent matching row, which mislabelled
+    calls that shared a time window (and, when a call wrote no row at all,
+    borrowed a different call's reason — the "same URL ×N" audit artifact).
+    Returns None for tools that never touch the gateway."""
     if not tool.startswith(_GATEWAY_PREFIX):
         return None
     base = tool[len(_GATEWAY_PREFIX) :]
-    qs = GatewayFetch.all_objects.filter(tool=base, created_at__gte=run.started_at)
-    qs = qs.exclude(error="") if want_error else qs.filter(error="")
-    return qs.order_by("-created_at").first()
+    row = None
+    if call_id:
+        # tool_use ids are globally unique, so match them WITHOUT the time
+        # window — a re-fetched URL de-dups onto an existing (older) row, which
+        # a windowed search would miss.
+        row = (
+            GatewayFetch.all_objects.filter(tool=base, call_id=call_id)
+            .exclude(id__in=seen_ids)
+            .order_by("created_at")
+            .first()
+        )
+    if row is None:
+        window = GatewayFetch.all_objects.filter(
+            tool=base, created_at__gte=run.started_at
+        ).exclude(id__in=seen_ids)
+        row = (
+            window.filter(run_key=_run_session_key(run)).order_by("created_at").first()
+            or window.filter(run_key="").order_by("created_at").first()
+        )
+    if row is not None:
+        seen_ids.add(row.id)
+    return row
 
 
-def _record_tool_call(run, event, arguments):
-    """Persist one streamed tool call for the Runs audit view. For gateway calls
-    the result body lives in the GatewayFetch corpus (the event stream names the
-    tool but omits its result), so link it back here for a complete record."""
+def _record_tool_call(run, event, arguments, seen_ids):
+    """Persist one streamed tool call for the Runs audit view and return it.
+
+    For gateway calls the result body and the real failure reason live in the
+    GatewayFetch corpus (the event stream names the tool but omits its result),
+    so the captured row is the source of truth — not the stream's error flag. A
+    page miss (paywall/404) is now returned to the agent WITHOUT isError so it
+    doesn't trip the circuit breaker, so the stream would call it a success;
+    reading the row keeps the audit honest (the row carries the reason)."""
     duration = event.get("duration")
     tool = event.get("tool", "")
     raw_error = event.get("error")
-    error = bool(raw_error)
-    # The stream flags failure as a boolean; keep any real string message.
     error_text = raw_error if isinstance(raw_error, str) else ""
     result_summary = ""
-    if error:
-        # The gateway ran the tool and captured WHY it failed (paywall / auth /
-        # rate-limit); link it so the audit shows the reason, not a bare flag.
-        if not error_text:
-            failed = _match_gateway_fetch(run, tool, want_error=True)
-            if failed:
-                error_text = failed.error
-    else:
-        fetch = _match_gateway_fetch(run, tool)
-        if fetch:
-            result_summary = fetch.content
-            if fetch.url:
-                arguments = {**arguments, "url": fetch.url}
-    ResearchAgentToolCall.objects.create(
+
+    row = _next_gateway_fetch(run, tool, seen_ids, event.get("toolCallId") or "")
+    if row is not None:
+        if row.url:
+            arguments = {**arguments, "url": row.url}
+        if row.error:
+            error_text = row.error
+        else:
+            result_summary = row.content
+
+    # Error if the captured row (or, for non-gateway tools, the stream) says so.
+    is_error = bool(error_text) or (bool(raw_error) and row is None)
+    return ResearchAgentToolCall.objects.create(
         run=run,
         tool=tool,
         arguments=arguments,
-        status=AgentToolCallStatus.ERROR if error else AgentToolCallStatus.SUCCESS,
+        status=AgentToolCallStatus.ERROR if is_error else AgentToolCallStatus.SUCCESS,
         result_summary=result_summary,
         duration_ms=int(duration * 1000) if duration else None,
         result_tokens=_token_count(result_summary),
@@ -318,17 +348,43 @@ def _reask_json(hermes, run, expectation):
     return "".join(chunks)
 
 
+def _gathered_corpus(run, max_sources=12, per_source_chars=1500):
+    """A compact digest of the pages this run actually fetched — for injection
+    into the budget-finalize prompt. The finalize runs as a fresh Hermes turn
+    (history=0), so it has NONE of the run's gathered context; handing it the
+    real page excerpts here lets it write findings from content in the prompt
+    rather than from a session memory it doesn't have. Scoped by the run's time
+    window (best-effort); once the tool_use id is on the stream we can scope by
+    run_key exactly."""
+    rows = (
+        GatewayFetch.all_objects.filter(
+            tool="fetch_page", created_at__gte=run.started_at
+        )
+        .exclude(content="")
+        .order_by("created_at")[:max_sources]
+    )
+    parts = [
+        f"### {r.url}\n{(r.content or '').strip()[:per_source_chars]}" for r in rows
+    ]
+    return "\n\n".join(parts)
+
+
 def _finalize_at_budget(hermes, run):
     """At the run budget: instead of stopping cold with nothing, ask the agent to
     write its final answer NOW from what it already gathered — no more searching or
     reading. Salvages a real result rather than failing empty. Best-effort."""
+    corpus = _gathered_corpus(run)
+    if not corpus:
+        # Nothing readable was gathered — no material to salvage a finding from.
+        return ""
     try:
         started = hermes.start_run(
             input_text=(
                 "You have reached this run's time/tool budget — do NOT search, "
-                "read, or call any tool again. Using ONLY the sources you have "
-                'already gathered in this session, return your final {"stagingItems": '
-                "[...]} object now — a single JSON object, no prose, no markdown fences."
+                "read, or call any tool again. Below are the sources you already "
+                "fetched in this run. Using ONLY these, return your final "
+                '{"stagingItems": [...]} object now — a single JSON object, no '
+                "prose, no markdown fences.\n\n# Sources you gathered\n" + corpus
             ),
             instructions="",
             session_id=f"{run.session.hermes_session_id}-r{run.id}",
@@ -494,13 +550,14 @@ def run_scout_job(run_id):
         return
 
     searches = 0
+    seen_ids = set()  # GatewayFetch rows already claimed by this run's audit
 
     def on_tool(event, preview):
         nonlocal searches
         searches += 1
         # Only the real call preview — substituting the task text here would
         # mislead the Runs audit when Hermes sends none.
-        _record_tool_call(run, event, {"query": preview})
+        _record_tool_call(run, event, {"query": preview}, seen_ids)
         _set_status(run, f"Searched {searches} source{'s' if searches != 1 else ''}…")
 
     streamed = _stream_run(hermes, run, "The Scout run was interrupted.", on_tool)
@@ -577,8 +634,10 @@ def run_critic_job(run_id, item_id):
     ):
         return
 
+    seen_ids = set()  # GatewayFetch rows already claimed by this run's audit
+
     def on_tool(event, preview):
-        _record_tool_call(run, event, {"itemId": item.id, "query": preview})
+        _record_tool_call(run, event, {"itemId": item.id, "query": preview}, seen_ids)
         _set_status(run, "Assessing the source…")
 
     streamed = _stream_run(hermes, run, "The Critic run was interrupted.", on_tool)
