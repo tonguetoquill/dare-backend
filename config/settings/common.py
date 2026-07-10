@@ -65,6 +65,7 @@ LOCAL_APPS = [
     "memory",
     "sharing",
     "feature_flags",
+    "research",
 ]
 
 THIRD_PARTY_APPS = [
@@ -356,6 +357,22 @@ RQ_QUEUES = {
 
 RQ_SHOW_ADMIN_LINK = True
 
+# Shared cache. The default LocMemCache is per-process, so cached values aren't
+# shared across uvicorn workers; Redis makes them visible to all. Shares the
+# Channels/RQ DB, namespaced via KEY_PREFIX — avoid cache.clear() here, which
+# FLUSHDBs the shared DB; delete specific keys instead.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": (
+            f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+            if REDIS_PASSWORD
+            else f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+        ),
+        "KEY_PREFIX": "dare_cache",
+    }
+}
+
 # File Upload Settings
 DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB in bytes
 FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100MB in bytes
@@ -374,3 +391,9 @@ SYFTBOX = {
     'DATASITES_ROOT': env.SYFTBOX_DATASITES_ROOT,
     'APP_NAME': env.SYFTBOX_APP_NAME,
 }
+
+# Hermes agent runtime (delegated research-agent runtime for Research Mode)
+HERMES_GATEWAY_URL = env.HERMES_GATEWAY_URL
+HERMES_API_KEY = env.HERMES_API_KEY
+HERMES_SYNC_SOUL = env.HERMES_SYNC_SOUL
+HERMES_SOUL_PATH = env.HERMES_SOUL_PATH
