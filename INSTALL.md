@@ -44,7 +44,7 @@ The bundled `docker-compose.yml` provisions:
 - **Weaviate** on `${WEAVIATE_PORT:-8080}` and `${WEAVIATE_GRPC_PORT:-50051}`
 - **Weaviate console** on `${WEAVIATE_CONSOLE_PORT:-8081}` when the `debug` profile is enabled
 - **Ollama** on `${OLLAMA_PORT:-11434}` when the `llama` profile is enabled
-- **quillmark-mcp** (document generation, built from the `quillmark-mcp/` git submodule) on `127.0.0.1:${QUILLMARK_DEBUG_PORT:-8090}` (debug only — DARE talks to it over the compose network)
+- **[quillmark-mcp](https://github.com/tonguetoquill/quillmark-mcp)** (document generation, built from the `quillmark-mcp/` git submodule) on `127.0.0.1:${QUILLMARK_DEBUG_PORT:-8090}` (debug only — DARE talks to it over the compose network)
 
 ### Quick start (recommended)
 
