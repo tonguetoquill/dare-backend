@@ -24,6 +24,7 @@ from conversations.constants import (
 from conversations.models import Conversation, Message, MessageToolCall
 from conversations.services.websocket_response_service import WebSocketResponseService
 from core.services.dtos.builder import LLMQueryRequestBuilder
+from mcp.services.artifact_bridge import maybe_create_pdf_artifact
 from mcp.services.mcp_tool_executor import mcp_tool_executor, MCPToolExecutorError
 from mcp.services.tool_result_context import tool_result_context_builder
 
@@ -51,6 +52,11 @@ class MCPToolHandler:
         )
     """
     
+    # Max tool-use turns in the follow-up loop (counting tool-call rounds
+    # only, like the agent-loop max_turns) — get_specs → create_document plus
+    # up to two self-correction retries on render diagnostics.
+    MAX_TOOL_ROUNDS = 4
+
     def __init__(self):
         # No LLMService here - it's passed via stream_tool_result_response
         # to avoid circular import (llm_service imports mcp.services)
@@ -138,6 +144,30 @@ class MCPToolHandler:
                 
                 # Extract result text
                 result_text = self._extract_result_text(result)
+
+                # Bridge document results (e.g. quillmark PDFs) into artifacts.
+                # Never fails the tool call — returns None for non-PDF results
+                # or on any bridge error, in which case behavior is unchanged.
+                bridged = await maybe_create_pdf_artifact(
+                    result,
+                    message=message,
+                    conversation=conversation,
+                    arguments=arguments,
+                    server_slug=server_slug,
+                    tool_name=actual_tool_name,
+                    send_callback=send_callback,
+                )
+                if bridged:
+                    # The hosted URL is docker-internal and useless to both the
+                    # browser and the model — replace it everywhere.
+                    result = self._sanitize_document_result(result, bridged)
+                    result_text = (
+                        f"Document rendered successfully as PDF artifact "
+                        f"'{bridged['title']}' (version {bridged['version']}). It is "
+                        f"already displayed to the user in the artifact panel with a "
+                        f"download button. Tell them it is ready and briefly summarize "
+                        f"its contents. Do not output any URL or link."
+                    )
 
                 # Send tool result to client
                 tool_result_payload = {
@@ -263,52 +293,113 @@ class MCPToolHandler:
         """
         bot_message_id = message_obj.id
 
-        tool_context = tool_result_context_builder.build(tool_results)
-
-        synthesis_message_data = {
-            **message_data,
-            # Follow-up synthesis should consume tool results, not start a new
-            # tool-use round. Some models otherwise try a second MCP call here.
-            "mcp_server_ids": [],
-            "dare_tool_slugs": [],
-            "web_search_enabled": False,
-        }
-
-        # Build a new request with tool results as the message
-        request = LLMQueryRequestBuilder.from_message_data(
-            message=tool_context,
-            conversation=conversation,
-            user=user,
-            message_data=synthesis_message_data,
-            llm=llm,
-            message_obj=message_obj,
-            platform=platform,
-        )
-
+        # Agentic tool loop (mirrors the Claude Code agent loop): each turn the
+        # model sees all tool results so far and either requests more tool
+        # calls — which we execute and feed back — or produces the final text.
+        # The loop ends naturally on a no-tool-call response; MAX_TOOL_ROUNDS
+        # is the max-turns safety cap. Tool errors (e.g. Typst diagnostics)
+        # flow back as results so the model can self-correct. On the final
+        # allowed turn tools are stripped, forcing synthesis. With zero
+        # follow-up tool calls this behaves exactly like the previous
+        # single-round implementation.
+        all_tool_results = list(tool_results)
         response_accumulator = ""
 
-        # Stream the follow-up response
-        async for chunk, usage in llm_service.query(request):
-            if chunk and chunk.strip():
-                response_accumulator += chunk
-                payload = WebSocketResponseService.format_streaming_chunk(
-                    message_id=bot_message_id,
-                    chunk=response_accumulator,
-                    is_complete=False,
-                    metadata={
-                        "senderName": DEFAULT_AI_SENDER_NAME,
-                        "senderType": SenderType.AI_ASSISTANT,
-                        "streaming": True,
-                        "regenerate": regenerate,
-                        "createdAt": message_obj.created_at.isoformat(),
-                    }
-                )
-                await send_callback(payload)
+        for round_index in range(self.MAX_TOOL_ROUNDS):
+            is_final_round = round_index == self.MAX_TOOL_ROUNDS - 1
+
+            synthesis_message_data = {
+                **message_data,
+                # DARE tools and web search never join the MCP follow-up loop.
+                "dare_tool_slugs": [],
+                "web_search_enabled": False,
+                "mcp_server_ids": (
+                    [] if is_final_round else message_data.get("mcp_server_ids", [])
+                ),
+            }
+
+            tool_context = tool_result_context_builder.build(all_tool_results)
+
+            request = LLMQueryRequestBuilder.from_message_data(
+                message=tool_context,
+                conversation=conversation,
+                user=user,
+                message_data=synthesis_message_data,
+                llm=llm,
+                message_obj=message_obj,
+                platform=platform,
+            )
+
+            response_accumulator = ""
+            round_tool_calls = None
+
+            async for chunk, usage in llm_service.query(request):
+                if usage and usage.get("tool_calls"):
+                    round_tool_calls = usage["tool_calls"]
+                if chunk and chunk.strip():
+                    response_accumulator += chunk
+                    payload = WebSocketResponseService.format_streaming_chunk(
+                        message_id=bot_message_id,
+                        chunk=response_accumulator,
+                        is_complete=False,
+                        metadata={
+                            "senderName": DEFAULT_AI_SENDER_NAME,
+                            "senderType": SenderType.AI_ASSISTANT,
+                            "streaming": True,
+                            "regenerate": regenerate,
+                            "createdAt": message_obj.created_at.isoformat(),
+                        }
+                    )
+                    await send_callback(payload)
+
+            if not round_tool_calls:
+                # No tool calls: this response is the final answer.
+                return response_accumulator
+
+            logger.debug(
+                f"[MCPToolHandler] Tool loop round {round_index + 1}: "
+                f"{len(round_tool_calls)} follow-up tool call(s)"
+            )
+            round_results = await self.handle_tool_calls(
+                tool_calls=round_tool_calls,
+                message=message_obj,
+                user=user,
+                conversation=conversation,
+                send_callback=send_callback,
+            )
+            all_tool_results.extend(round_results)
+            # Interim text before a tool call is working narration, not the
+            # final answer — the next round rebuilds the response.
 
         return response_accumulator
     
     # ========== Private Helper Methods ==========
     
+    def _sanitize_document_result(self, result: Any, bridged: Dict) -> Any:
+        """
+        Rewrite a bridged document result for the frontend tool-call UI.
+
+        The MCP server's hosted URL points inside the Docker network, so any
+        link in the payload would be dead in the browser. Replace text/link
+        content with a pointer to the created artifact.
+        """
+        if not isinstance(result, dict):
+            return result
+        sanitized = dict(result)
+        summary = (
+            f"Rendered PDF artifact '{bridged['title']}' "
+            f"(version {bridged['version']})."
+        )
+        sanitized["content"] = [{"type": "text", "text": summary}]
+        if "structuredContent" in sanitized:
+            sanitized["structuredContent"] = {
+                "artifactId": bridged["artifact_id"],
+                "title": bridged["title"],
+                "filename": bridged["filename"],
+                "mimeType": "application/pdf",
+            }
+        return sanitized
+
     def _extract_result_text(self, result: Any) -> str:
         """Extract text from tool result."""
         if isinstance(result, dict):
