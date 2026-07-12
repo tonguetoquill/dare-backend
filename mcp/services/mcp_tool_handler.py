@@ -53,9 +53,10 @@ class MCPToolHandler:
     """
     
     # Max tool-use turns in the follow-up loop (counting tool-call rounds
-    # only, like the agent-loop max_turns) — get_specs → create_document plus
-    # up to two self-correction retries on render diagnostics.
-    MAX_TOOL_ROUNDS = 4
+    # only, like the agent-loop max_turns). Sized for multi-document prompts:
+    # get_specs + create_document per document (parallel calls within a round
+    # count once) plus self-correction retries on render diagnostics.
+    MAX_TOOL_ROUNDS = 6
 
     def __init__(self):
         # No LLMService here - it's passed via stream_tool_result_response

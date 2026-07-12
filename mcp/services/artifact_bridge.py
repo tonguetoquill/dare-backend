@@ -25,7 +25,6 @@ from asgiref.sync import sync_to_async
 
 from conversations.constants import ArtifactStatus, ArtifactType
 from conversations.models import Artifact, Conversation, Message
-from conversations.services.artifact_tool_executor import artifact_tool_executor
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +100,32 @@ async def _fetch_pdf(url: str) -> Optional[bytes]:
 
 @sync_to_async
 def _find_existing_artifact(
-    conversation: Conversation, source_tool: str, quill: str
+    conversation: Conversation,
+    source_tool: str,
+    quill: str,
+    title: str,
+    current_message: Message,
 ) -> Optional[Artifact]:
-    """Latest bridged artifact for the same quill in this conversation."""
+    """Prior artifact that this render is an edit OF, or None for a new doc.
+
+    A render only versions an existing artifact when the quill AND the title
+    match a document from an EARLIER message. Same-message renders never
+    match — one prompt may legitimately produce several documents (even from
+    the same template), and they must not clobber each other into a single
+    version chain. A title change starts a new artifact rather than a new
+    version, which keeps distinct documents distinct at the cost of splitting
+    history on retitling edits.
+    """
     queryset = Artifact.active_objects.filter(
         conversation=conversation,
         source_tool=source_tool,
         artifact_type=ArtifactType.PDF,
+        title=title,
     ).order_by("-created_at")
     if quill:
         queryset = queryset.filter(metadata__quill=quill)
+    if current_message is not None:
+        queryset = queryset.exclude(message=current_message)
     return queryset.first()
 
 
@@ -184,8 +199,15 @@ async def maybe_create_pdf_artifact(
         }
 
         existing = await _find_existing_artifact(
-            conversation, source_tool, meta["quill"]
+            conversation, source_tool, meta["quill"], meta["title"], message
         )
+        # Imported lazily: artifact_tool_executor pulls in the conversations
+        # service stack, which circularly imports mcp.services at module load
+        # (fine at runtime, breaks test discovery).
+        from conversations.services.artifact_tool_executor import (
+            artifact_tool_executor,
+        )
+
         if existing:
             artifact = await _create_version(
                 existing, message, data_uri, meta["title"], filename, metadata

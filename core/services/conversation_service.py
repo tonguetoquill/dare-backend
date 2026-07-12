@@ -298,7 +298,7 @@ class ConversationService:
         if not raw:
             return "New Chat"
         first_line = raw.strip().splitlines()[0]
-        title = first_line.strip().strip("\"'`").lstrip("#*- ").strip()
+        title = first_line.strip().lstrip("#*- ").strip().strip("\"'`").strip()
         if len(title) > 120:
             title = title[:119].rstrip() + "…"
         return title or "New Chat"
