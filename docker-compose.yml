@@ -158,7 +158,7 @@ services:
 
   quillmark-mcp:
     build:
-      context: ../../quillmark-mcp
+      context: ./quillmark-mcp
       dockerfile: Dockerfile
     image: quillmark-mcp:dev
     container_name: dare-quillmark

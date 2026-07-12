@@ -262,7 +262,12 @@ class ConversationService:
         messages = [
             {
                 "role": "system",
-                "content": "Generate a short, descriptive conversation title (max 6 words).",
+                "content": (
+                    "Generate a short, descriptive conversation title of at "
+                    "most 6 words. Reply with ONLY the title itself - no "
+                    "quotes, no markdown, no explanation, no punctuation at "
+                    "the end."
+                ),
             },
             {
                 "role": "user",
@@ -276,9 +281,27 @@ class ConversationService:
 
         try:
             ai_service = await LLMService()._get_ai_service(llm, user=user)
-            return await ai_service.get_chat_completion(messages)
+            title = await ai_service.get_chat_completion(messages)
+            return self._sanitize_title(title)
         except Exception:
             return "New Chat"
+
+    @staticmethod
+    def _sanitize_title(raw: str) -> str:
+        """Normalize a model-generated title for the 255-char DB column.
+
+        Models (especially small ones) sometimes return markdown headers,
+        surrounding quotes, or whole paragraphs; unsanitized output crashed
+        the save with StringDataRightTruncation and left conversations
+        untitled.
+        """
+        if not raw:
+            return "New Chat"
+        first_line = raw.strip().splitlines()[0]
+        title = first_line.strip().strip("\"'`").lstrip("#*- ").strip()
+        if len(title) > 120:
+            title = title[:119].rstrip() + "…"
+        return title or "New Chat"
 
     async def get_gpt_35_turbo_model(self) -> LLM:
         """Fetch the cheapest active text model for title generation.

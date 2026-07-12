@@ -318,7 +318,9 @@ class MCPToolHandler:
                 ),
             }
 
-            tool_context = tool_result_context_builder.build(all_tool_results)
+            tool_context = tool_result_context_builder.build(
+                all_tool_results, final=is_final_round
+            )
 
             request = LLMQueryRequestBuilder.from_message_data(
                 message=tool_context,

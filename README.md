@@ -80,9 +80,12 @@ See [docs/architecture.md](docs/architecture.md) for the full diagram and
 
 ### Docker
 
+For local development, `scripts/dev-setup.sh --demo-user` does all of the below in one command
+(submodule init, env files, build, demo login) — see [INSTALL.md](INSTALL.md).
+
 ```bash
-# 1. Clone
-git clone <repo-url> dare-backend && cd dare-backend
+# 1. Clone (with the quillmark-mcp submodule)
+git clone --recurse-submodules <repo-url> dare-backend && cd dare-backend
 
 # 2. Configure
 cp .example.env .env
