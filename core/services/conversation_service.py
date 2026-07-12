@@ -281,16 +281,25 @@ class ConversationService:
             return "New Chat"
 
     async def get_gpt_35_turbo_model(self) -> LLM:
-        """Fetch the gpt-3.5-turbo LLM."""
+        """Fetch the cheapest active text model for title generation.
+
+        Prefers gpt-3.5-turbo when it is active, but falls back to any
+        active non-image model (cheapest first) so installs without an
+        OpenAI key still get titles from whichever provider is configured.
+        """
         llm = await database_sync_to_async(
             lambda: LLM.objects.filter(
-                identifier="gpt-3.5-turbo", provider="openai"
+                identifier="gpt-3.5-turbo", provider="openai", is_active=True
             ).first()
         )()
         return (
             llm
             or await database_sync_to_async(
-                lambda: LLM.objects.filter(provider="openai").first()
+                lambda: LLM.objects.filter(
+                    is_active=True, is_image_generator=False
+                )
+                .order_by("output_token_rate_per_million")
+                .first()
             )()
         )
 
