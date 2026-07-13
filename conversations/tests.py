@@ -1,8 +1,13 @@
+import asyncio
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock, patch
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
 from conversations.models import LLM
+from conversations.services.message_coordinator import MessageCoordinator
 from core.services.claude_service import ClaudeService
 from core.services.openai_service import OpenAIService
 
@@ -144,3 +149,54 @@ class OpenAICapabilityPayloadTests(TestCase):
 
         self.assertEqual(params["max_completion_tokens"], 100)
         self.assertNotIn("temperature", params)
+
+
+class MessageTurnSerializationTests(IsolatedAsyncioTestCase):
+    """Regression test: Socket.IO dispatches each inbound event as its own
+    concurrent task (async_handlers, on by default), and one
+    MessageCoordinator instance is reused for every message in a
+    conversation. Without serialization, rapid-fire messages ("1", "2", "3"
+    sent back-to-back) could interleave — a later message's row could commit
+    to the DB before an earlier turn's LLM call read conversation history,
+    causing the earlier turn to see and react to the later message's content
+    (observed as a tool trigger landing on the wrong turn). `_turn_lock`
+    must serialize full-turn processing so this can't happen."""
+
+    async def test_concurrent_new_message_calls_never_overlap(self):
+        coordinator = MessageCoordinator(conversation=object(), user=None)
+
+        active = 0
+        max_concurrent = 0
+        order = []
+
+        async def fake_impl(message_data, sender_name=None, model_id=None):
+            nonlocal active, max_concurrent
+            active += 1
+            max_concurrent = max(max_concurrent, active)
+            order.append(("start", message_data["message"]))
+            await asyncio.sleep(0.01)
+            order.append(("end", message_data["message"]))
+            active -= 1
+            return None
+
+        with patch.object(
+            coordinator, "_handle_new_message_impl", new=AsyncMock(side_effect=fake_impl)
+        ):
+            await asyncio.gather(
+                coordinator.handle_new_message({"message": "1"}),
+                coordinator.handle_new_message({"message": "2"}),
+                coordinator.handle_new_message({"message": "3"}),
+            )
+
+        self.assertEqual(max_concurrent, 1)
+        self.assertEqual(
+            order,
+            [
+                ("start", "1"),
+                ("end", "1"),
+                ("start", "2"),
+                ("end", "2"),
+                ("start", "3"),
+                ("end", "3"),
+            ],
+        )

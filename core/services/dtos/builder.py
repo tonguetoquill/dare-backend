@@ -94,6 +94,7 @@ class LLMQueryRequestBuilder:
             ),
             history_limit=message_data.get("history_limit", 20),
             use_memory=bool(message_data.get("use_memory", False)),
+            history_skip_recent=message_data.get("history_skip_recent", 2),
         )
 
         # Detect Socratic bots platform BEFORE building generation config

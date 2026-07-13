@@ -64,7 +64,8 @@ async def build_classic_socratic_messages(
 
     history_list = await get_conversation_history(
         request.conversation,
-        limit=request.context.history_limit
+        limit=request.context.history_limit,
+        skip_recent=request.context.history_skip_recent,
     ) if request.conversation else []
 
     conversation_history = _format_transcript(history_list)
@@ -138,7 +139,8 @@ async def build_advanced_socratic_messages(
 
     history_list = await get_conversation_history(
         request.conversation,
-        limit=request.context.history_limit
+        limit=request.context.history_limit,
+        skip_recent=request.context.history_skip_recent,
     ) if request.conversation else []
 
     conversation_history = _format_transcript(history_list)

@@ -18,7 +18,7 @@ fail the tool call — callers wrap it and fall back to text-only behavior.
 import base64
 import logging
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 import httpx
 from asgiref.sync import sync_to_async
@@ -105,17 +105,21 @@ def _find_existing_artifact(
     source_tool: str,
     quill: str,
     title: str,
-    current_message: Message,
+    exclude_ids: Optional[Set[int]],
 ) -> Optional[Artifact]:
     """Prior artifact that this render is an edit OF, or None for a new doc.
 
     A render only versions an existing artifact when the quill AND the title
-    match a document from an EARLIER message. Same-message renders never
-    match — one prompt may legitimately produce several documents (even from
-    the same template), and they must not clobber each other into a single
-    version chain. A title change starts a new artifact rather than a new
-    version, which keeps distinct documents distinct at the cost of splitting
-    history on retitling edits.
+    match a prior document. ``exclude_ids`` holds the ids of artifacts already
+    bridged earlier in this same AI turn — one prompt may legitimately produce
+    several documents (even from the same template) across tool-loop rounds,
+    and a later render must not match its own earlier output. Regenerating an
+    existing document reuses the same ``Message`` row, so excluding by message
+    (the previous behavior) incorrectly hid the very artifact a regenerate is
+    meant to version — excluding by id, scoped to this turn, does not. A title
+    change starts a new artifact rather than a new version, which keeps
+    distinct documents distinct at the cost of splitting history on retitling
+    edits.
     """
     queryset = Artifact.active_objects.filter(
         conversation=conversation,
@@ -125,8 +129,8 @@ def _find_existing_artifact(
     ).order_by("-created_at")
     if quill:
         queryset = queryset.filter(metadata__quill=quill)
-    if current_message is not None:
-        queryset = queryset.exclude(message=current_message)
+    if exclude_ids:
+        queryset = queryset.exclude(id__in=exclude_ids)
     return queryset.first()
 
 
@@ -168,9 +172,15 @@ async def maybe_create_pdf_artifact(
     server_slug: str,
     tool_name: str,
     send_callback: Callable,
+    bridged_artifact_ids: Optional[Set[int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Bridge a PDF-producing MCP tool result into a DARE Artifact.
+
+    ``bridged_artifact_ids`` is the set of artifact ids already bridged
+    earlier in this same AI turn (mutated in place as new artifacts are
+    bridged) — see ``_find_existing_artifact`` for why this replaces
+    excluding by message.
 
     Returns ``{"artifact_id", "title", "filename", "version"}`` when a PDF was
     bridged, or None when the result is not a PDF document. Raises nothing:
@@ -200,7 +210,7 @@ async def maybe_create_pdf_artifact(
         }
 
         existing = await _find_existing_artifact(
-            conversation, source_tool, meta["quill"], meta["title"], message
+            conversation, source_tool, meta["quill"], meta["title"], bridged_artifact_ids
         )
         # Imported lazily: artifact_tool_executor pulls in the conversations
         # service stack, which circularly imports mcp.services at module load
@@ -227,6 +237,9 @@ async def maybe_create_pdf_artifact(
                 metadata=metadata,
             )
             event_type = "artifact_created"
+
+        if bridged_artifact_ids is not None:
+            bridged_artifact_ids.add(artifact.id)
 
         event = {
             "type": event_type,

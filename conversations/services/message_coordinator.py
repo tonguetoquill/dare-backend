@@ -97,6 +97,18 @@ class MessageCoordinator:
         # Track active artifact generation tasks for cancellation
         self._artifact_tasks: Dict[str, asyncio.Task] = {}
 
+        # Socket.IO's AsyncServer dispatches each inbound event as its own
+        # task (async_handlers, on by default) and one coordinator instance
+        # is reused for every message in a conversation — so back-to-back
+        # sends (e.g. rapid "1", "2", "3") could otherwise run handle_new_message
+        # concurrently and interleave. That let a later message's row commit
+        # to the DB before an earlier turn's LLM call read conversation
+        # history, so the earlier turn's response would see and react to the
+        # later message's content (observed as a tool trigger landing on the
+        # wrong turn). Serializing full-turn processing (user message create
+        # through AI response completion) keeps history strictly ordered.
+        self._turn_lock = asyncio.Lock()
+
     async def send(self, data: Dict[str, Any]):
         """Send data through WebSocket if callback is available."""
         if self.send_callback:
@@ -336,6 +348,21 @@ class MessageCoordinator:
         sender_name: str = None,
         model_id: Optional[str] = None,
     ) -> Optional[Message]:
+        """Handle creation of a new user message and generate AI response.
+
+        Serialized on ``_turn_lock`` — see its docstring in ``__init__``.
+        """
+        async with self._turn_lock:
+            return await self._handle_new_message_impl(
+                message_data, sender_name, model_id
+            )
+
+    async def _handle_new_message_impl(
+        self,
+        message_data: Dict[str, Any],
+        sender_name: str = None,
+        model_id: Optional[str] = None,
+    ) -> Optional[Message]:
         """
         Handle creation of a new user message and generate AI response.
 
@@ -453,6 +480,18 @@ class MessageCoordinator:
             return None
 
     async def handle_regenerate_response(
+        self,
+        message_data: Dict[str, Any],
+        model_id: Optional[str] = None,
+    ) -> Optional[Message]:
+        """Handle regeneration of an existing AI message.
+
+        Serialized on ``_turn_lock`` — see its docstring in ``__init__``.
+        """
+        async with self._turn_lock:
+            return await self._handle_regenerate_response_impl(message_data, model_id)
+
+    async def _handle_regenerate_response_impl(
         self,
         message_data: Dict[str, Any],
         model_id: Optional[str] = None,
@@ -625,6 +664,11 @@ class MessageCoordinator:
 
             # Track DARE/MCP tool results that need a follow-up model response.
             executed_tool_results = []
+            # PDF artifact ids bridged so far in this turn (initial round +
+            # every follow-up round of the tool loop) — lets a regenerate or
+            # multi-round render still find and version its own prior output.
+            # See mcp.services.artifact_bridge._find_existing_artifact.
+            bridged_artifact_ids = set()
 
             # Stream from LLM service (MCP tools fetched internally if mcp_server_ids present)
             async for chunk, usage in self.llm_service.query(request):
@@ -638,6 +682,7 @@ class MessageCoordinator:
                             user=self.user,
                             conversation=self.conversation,
                             send_callback=self.send,
+                            bridged_artifact_ids=bridged_artifact_ids,
                         )
                         executed_tool_results.extend(tool_results)
 
@@ -721,6 +766,7 @@ class MessageCoordinator:
                             send_callback=self.send,
                             llm_service=self.llm_service,
                             regenerate=regenerate,
+                            bridged_artifact_ids=bridged_artifact_ids,
                         )
                     )
                 except Exception as e:

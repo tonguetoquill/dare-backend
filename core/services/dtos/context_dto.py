@@ -24,6 +24,12 @@ class ContextConfig:
         document_similarity_threshold: Minimum similarity score for retrieval
         history_limit: Number of conversation messages to include
         use_memory: Whether to search user's memory store using the message
+        history_skip_recent: Number of most-recent DB messages to exclude
+            from history because the caller re-supplies their content via
+            ``request.message`` itself. See
+            ``get_conversation_history`` for why this must be 1 (not the
+            default 2) when ``request.message`` isn't the current-turn user
+            message — e.g. MCP tool-loop follow-up rounds.
     """
 
     file_ids: List[str] = field(default_factory=list)
@@ -39,6 +45,7 @@ class ContextConfig:
     document_similarity_threshold: float = 0.5
     history_limit: int = 20
     use_memory: bool = False
+    history_skip_recent: int = 2
 
     def has_any_context(self) -> bool:
         """Check if any context source is configured."""

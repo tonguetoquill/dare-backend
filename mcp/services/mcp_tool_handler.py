@@ -11,7 +11,7 @@ which should only coordinate message flow.
 
 import json
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -70,23 +70,32 @@ class MCPToolHandler:
         user,
         conversation: Conversation,
         send_callback: Callable,
+        bridged_artifact_ids: Optional[Set[int]] = None,
     ) -> List[Dict]:
         """
         Handle MCP tool calls from LLM response.
-        
+
         Executes each tool call and streams results back to the client.
         Returns the results for follow-up LLM call.
-        
+
         Args:
             tool_calls: List of tool call dicts with name, arguments, and id
             message: AI message object for context
             user: User instance
             conversation: Conversation instance
             send_callback: Async callback for WebSocket notifications
-            
+            bridged_artifact_ids: Ids of PDF artifacts already bridged earlier
+                in this same AI turn (see ``artifact_bridge._find_existing_artifact``).
+                Shared across every round of one turn's tool loop so a regenerate
+                or multi-round render still finds and versions its own prior
+                output. A fresh ``set()`` is used when not provided.
+
         Returns:
             List of tool result dicts with tool_call_id, tool_name, and result
         """
+        if bridged_artifact_ids is None:
+            bridged_artifact_ids = set()
+
         results = []
         bot_message_id = message.id
         
@@ -157,6 +166,7 @@ class MCPToolHandler:
                     server_slug=server_slug,
                     tool_name=actual_tool_name,
                     send_callback=send_callback,
+                    bridged_artifact_ids=bridged_artifact_ids,
                 )
                 if bridged:
                     # The hosted URL is docker-internal and useless to both the
@@ -269,6 +279,7 @@ class MCPToolHandler:
         send_callback: Callable,
         llm_service,
         regenerate: bool = False,
+        bridged_artifact_ids: Optional[Set[int]] = None,
     ) -> str:
         """
         Make a follow-up LLM call with tool results to get the final response.
@@ -288,10 +299,15 @@ class MCPToolHandler:
             send_callback: Async callback for WebSocket streaming
             llm_service: LLMService instance for making follow-up calls
             regenerate: Whether this is a regeneration
+            bridged_artifact_ids: Same-turn PDF-artifact id set carried over
+                from the initial ``handle_tool_calls`` round — see there.
 
         Returns:
             The accumulated response text
         """
+        if bridged_artifact_ids is None:
+            bridged_artifact_ids = set()
+
         bot_message_id = message_obj.id
 
         # Agentic tool loop (mirrors the Claude Code agent loop): each turn the
@@ -317,6 +333,14 @@ class MCPToolHandler:
                 "mcp_server_ids": (
                     [] if is_final_round else message_data.get("mcp_server_ids", [])
                 ),
+                # `message` below is a tool-result summary, not the current
+                # user turn, so only the still-empty in-progress AI message
+                # should be skipped from history — the real user request
+                # (the 2nd-most-recent row) must stay so the model still
+                # knows what the user actually asked for. Otherwise it falls
+                # back to whatever the previous turn was about (e.g.
+                # generating a document from a stale prior request).
+                "history_skip_recent": 1,
             }
 
             tool_context = tool_result_context_builder.build(
@@ -369,6 +393,7 @@ class MCPToolHandler:
                 user=user,
                 conversation=conversation,
                 send_callback=send_callback,
+                bridged_artifact_ids=bridged_artifact_ids,
             )
             all_tool_results.extend(round_results)
             # Interim text before a tool call is working narration, not the

@@ -1320,6 +1320,10 @@ class Artifact(BaseModel):
             current_section=self.current_section,
             status=ArtifactStatus.PLANNING,
             version=self.version + 1,
+            metadata=self.metadata,
+            filename=self.filename,
+            content_type=self.content_type,
+            source_tool=self.source_tool,
         )
         new_artifact.save()
 

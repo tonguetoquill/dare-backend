@@ -41,8 +41,9 @@ def get_prompt(prompt_id: str = None) -> str:
     return ""
 
 
-@database_sync_to_async
-def get_conversation_history(conversation: Conversation, limit: int = 10) -> list:
+def _get_conversation_history_sync(
+    conversation: Conversation, limit: int = 10, skip_recent: int = 2
+) -> list:
     """Retrieves recent chat history for AI context, including tool results and artifacts.
 
     For assistant messages with tool calls, appends the tool results to give
@@ -54,6 +55,16 @@ def get_conversation_history(conversation: Conversation, limit: int = 10) -> lis
     Args:
         conversation: Conversation instance
         limit: Maximum number of messages to retrieve
+        skip_recent: Number of most-recent messages to exclude, because the
+            caller re-supplies their content itself (default 2: the
+            in-progress AI placeholder row plus the current-turn user
+            message, which ``build_standard_messages`` re-appends verbatim
+            as ``request.message``). Callers whose ``request.message`` is
+            NOT the current-turn user message — e.g. the MCP tool loop's
+            follow-up rounds, where it's a tool-result summary instead —
+            must pass 1, or the real user request silently drops out of
+            context and the model falls back to whatever the previous turn
+            was about.
 
     Returns:
         List of message dictionaries with role and content
@@ -66,9 +77,13 @@ def get_conversation_history(conversation: Conversation, limit: int = 10) -> lis
     ).order_by('-created_at')
 
     if limit >= 50:
-        messages = messages[2:]
+        messages = messages[skip_recent:]
     else:
-        messages = messages[2:limit+2] if limit > 0 else messages[2:]
+        messages = (
+            messages[skip_recent : limit + skip_recent]
+            if limit > 0
+            else messages[skip_recent:]
+        )
 
     # Track artifact groups to only include latest version once
     included_artifact_groups = set()
@@ -131,6 +146,12 @@ def get_conversation_history(conversation: Conversation, limit: int = 10) -> lis
         f"{len(included_artifact_groups)} artifact groups included"
     )
     return result
+
+
+# Split from the sync implementation above so tests can call the ORM logic
+# directly on the test's own connection/thread instead of round-tripping
+# through database_sync_to_async's thread-sensitive executor.
+get_conversation_history = database_sync_to_async(_get_conversation_history_sync)
 
 
 def _format_artifact_for_history(artifact: 'Artifact') -> str:

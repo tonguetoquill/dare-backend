@@ -125,7 +125,8 @@ async def build_standard_messages(
     # Add conversation history
     conversation_history = await get_conversation_history(
         request.conversation,
-        limit=request.context.history_limit
+        limit=request.context.history_limit,
+        skip_recent=request.context.history_skip_recent,
     ) if request.conversation else []
     messages.extend([msg for msg in conversation_history if msg["content"].strip()])
 
