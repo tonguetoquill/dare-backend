@@ -54,10 +54,10 @@ git clone --recurse-submodules https://github.com/tonguetoquill/dare-backend.git
 cd dare-backend
 # Already cloned without submodules? Run: git submodule update --init
 
-# 2. One-command setup: checks Docker, inits the submodule, clones the
-#    cmu-quiver sibling repo, creates .env + docker-compose.override.yml,
-#    builds and starts the stack (migrations run automatically), and
-#    optionally creates a verified demo superuser with a $100 wallet.
+# 2. One-command setup: checks Docker, inits the submodule, creates .env +
+#    docker-compose.override.yml, builds and starts the stack (migrations
+#    run automatically), and optionally creates a verified demo superuser
+#    with a $100 wallet.
 scripts/dev-setup.sh --demo-user
 
 # 3. Set your Anthropic key in docker-compose.override.yml (CLAUDE_API_KEY),
@@ -80,7 +80,6 @@ If you prefer to do what `scripts/dev-setup.sh` does by hand:
 
 ```bash
 git submodule update --init                      # quillmark-mcp build context
-git clone https://github.com/tonguetoquill/cmu-quiver.git ../cmu-quiver  # quill templates (sibling dir)
 cp .example.env .env                             # set DB_PASSWORD at minimum
 cp docker-compose.override.yml.example docker-compose.override.yml
 # Put DJANGO_SECRET_KEY and CLAUDE_API_KEY (or OPENAI/GEMINI keys) in the override

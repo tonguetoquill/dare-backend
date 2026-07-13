@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 FETCH_TIMEOUT_SECONDS = 30.0
 MAX_PDF_BYTES = 15 * 1024 * 1024  # 15 MB safety cap
 
-_QUILL_RE = re.compile(r"^QUILL:\s*(\S+)", re.MULTILINE)
+# card-yaml `$quill:` is the current syntax; bare `QUILL:` kept for older content.
+_QUILL_RE = re.compile(r"^\$?(?:quill|QUILL):\s*(\S+)", re.MULTILINE)
 _TITLE_RES = [
     re.compile(r"^subject:\s*(.+)$", re.MULTILINE),
     re.compile(r"^title:\s*(.+)$", re.MULTILINE),

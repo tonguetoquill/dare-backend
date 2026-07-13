@@ -11,10 +11,9 @@ cd dare-backend
 scripts/dev-setup.sh --demo-user
 ```
 
-The script checks Docker, inits the `quillmark-mcp` submodule, clones the
-`cmu-quiver` sibling repo (quill templates, mounted read-only into quillmark-mcp),
-writes `.env` + `docker-compose.override.yml`, starts the stack (migrations run in
-the entrypoint), and creates a verified `demo@dare.local` / `darelocal` superuser
+The script checks Docker, inits the `quillmark-mcp` submodule, writes `.env`
++ `docker-compose.override.yml`, starts the stack (migrations run in the
+entrypoint), and creates a verified `demo@dare.local` / `darelocal` superuser
 with $100 wallet credit. Set `CLAUDE_API_KEY` in `docker-compose.override.yml`
 afterwards and `docker compose up -d`.
 
@@ -95,9 +94,9 @@ WalletService.add_topup(u, amount=Decimal('100.00'), message='local dev top-up')
 - `quillmark-mcp/` is a git submodule (https://github.com/tonguetoquill/quillmark-mcp)
   and the build context for the `quillmark-mcp` compose service. If the directory is
   empty, run `git submodule update --init`.
-- The quill templates live in a **sibling** checkout at `../cmu-quiver`
-  (https://github.com/tonguetoquill/cmu-quiver), mounted read-only at `/quiver` —
-  it stays a sibling until its org repo exists.
+- The quill templates live in the in-repo `cmu-quiver/` directory, mounted
+  read-only at `/quiver`. See `cmu-quiver/README.md` for the brand system and
+  quill-authoring guide.
 - The DARE backend reaches quillmark over the compose network; host port
   `127.0.0.1:8090` is debug-only.
 

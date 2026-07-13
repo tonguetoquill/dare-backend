@@ -32,7 +32,7 @@ class ToolResultContextBuilder:
                 "input and CALL THE TOOL AGAIN now — do not paste the "
                 "corrected content into the chat; content only counts when it "
                 "goes through the tool. If further tool calls are needed to "
-                "finish the user's request (e.g. get_specs then "
+                "finish the user's request (e.g. get_spec then "
                 "create_document), make them. Only reply in plain text once "
                 "the task is fully done, and then briefly summarize the "
                 "outcome for the user.",

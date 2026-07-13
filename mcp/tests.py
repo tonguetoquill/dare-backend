@@ -48,16 +48,28 @@ class DetectPdfUrlTests(SimpleTestCase):
 class ExtractDocumentMetaTests(SimpleTestCase):
     def test_subject_and_quill_extracted(self):
         content = (
-            "---\nQUILL: cmu_memo@0.1.0\nsubject: FY27 Funding Request\n---\n\nBody."
+            "~~~card-yaml\n$quill: cmu_memo@0.1.0\n$kind: main\n"
+            "subject: FY27 Funding Request\n~~~\n\nBody."
         )
         meta = _extract_document_meta({"content": content})
         self.assertEqual(meta["quill"], "cmu_memo@0.1.0")
         self.assertEqual(meta["title"], "FY27 Funding Request")
 
     def test_headline_used_for_onepager(self):
-        content = "---\nQUILL: cmu_onepager@0.1.0\nheadline: DARE: The Case for FY27\n---\nBody"
+        content = (
+            "~~~card-yaml\n$quill: cmu_onepager@0.1.0\n$kind: main\n"
+            "headline: DARE: The Case for FY27\n~~~\nBody"
+        )
         meta = _extract_document_meta({"content": content})
         self.assertEqual(meta["title"], "DARE: The Case for FY27")
+
+    def test_legacy_frontmatter_still_parsed(self):
+        content = (
+            "---\nQUILL: cmu_memo@0.1.0\nsubject: FY27 Funding Request\n---\n\nBody."
+        )
+        meta = _extract_document_meta({"content": content})
+        self.assertEqual(meta["quill"], "cmu_memo@0.1.0")
+        self.assertEqual(meta["title"], "FY27 Funding Request")
 
     def test_fallback_title(self):
         meta = _extract_document_meta({"content": "no frontmatter here"})

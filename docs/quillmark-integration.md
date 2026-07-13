@@ -1,7 +1,7 @@
 # Quillmark Integration — CMU Document Generation
 
-DARE chats can generate brand-compliant, typeset PDF documents (CMU memos,
-reports, one-pagers) through [quillmark-mcp](https://github.com/tonguetoquill/quillmark-mcp),
+DARE chats can generate brand-compliant, typeset PDF documents (CMU letters,
+memos, reports, one-pagers) through [quillmark-mcp](https://github.com/tonguetoquill/quillmark-mcp),
 a Typst-based document renderer that speaks the Model Context Protocol. This
 page explains the architecture, the seams it touches, and how to extend it.
 
@@ -16,17 +16,18 @@ Browser ── Socket.IO ──> DARE web ── streamable-HTTP MCP ──> qui
 ```
 
 - **quillmark-mcp** runs as a compose service (`docker-compose.yml`), built
-  from the sibling `../../quillmark-mcp` checkout. It loads document templates
-  ("quills") from the sibling `../cmu-quiver` repo, mounted read-only at
+  from the `quillmark-mcp/` git submodule. It loads document templates
+  ("quills") from the in-repo `cmu-quiver/` directory, mounted read-only at
   `/quiver`. The browser never talks to it.
 - The server is registered in DARE's MCP catalog by migration
   `mcp/0012_seed_quillmark_server` (slug `quillmark`, transport
   `streamable_http`, auth `none`, URL `http://quillmark-mcp:8080/mcp`). Users
   click **Connect** once on `/mcp` (no credentials) and select the server in
   the chat composer.
-- The LLM drives three MCP tools: `list_quills` → `get_specs` (returns an
-  instruction + field blueprint per template) → `create_document` (markdown +
-  YAML frontmatter, starting `QUILL: <name>@<version>`).
+- The LLM drives three MCP tools: `list_quills` → `get_spec` (returns an
+  instruction + field blueprint per template) → `create_document` (a
+  `~~~card-yaml` block opening with `$quill: <name>@<version>` and
+  `$kind: main`, then the markdown body).
 
 ## The result → artifact bridge
 
@@ -55,13 +56,13 @@ failures degrade silently to the old text-only behavior.
 ## The agentic tool loop
 
 `mcp_tool_handler.stream_tool_result_response` was a single follow-up call
-that stripped all tools — the model could never chain `get_specs` →
+that stripped all tools — the model could never chain `get_spec` →
 `create_document`. It is now an agentic loop (same shape as the Claude Code
 agent loop): each turn the model sees all tool results so far and either
 requests more tool calls (executed and fed back) or produces the final text.
 
 - Natural termination: a response with no tool calls ends the loop.
-- Safety cap: `MAX_TOOL_ROUNDS = 4` tool-use turns; the final allowed turn
+- Safety cap: `MAX_TOOL_ROUNDS = 6` tool-use turns; the final allowed turn
   strips `mcp_server_ids`, forcing synthesis.
 - Self-correction: Typst render errors return as tool results with
   diagnostics, so the model fixes its frontmatter and retries.
@@ -79,7 +80,7 @@ requests more tool calls (executed and fed back) or produces the final text.
 
 ## Adding a document template
 
-Templates live in the `cmu-quiver` repo (see its README for authoring). To
+Templates live in the `cmu-quiver/` directory (see its README for authoring). To
 add one: drop a `quills/<name>/<x.y.z>/` directory (Quill.yaml + plate.typ +
 example.md + vendored packages) and `docker compose restart quillmark-mcp`.
 No DARE code changes. Two caches to know about:
@@ -93,7 +94,7 @@ No DARE code changes. Two caches to know about:
 
 ```bash
 # Standalone render of every template (bypasses DARE):
-../cmu-quiver/scripts/render-examples.sh          # uses the 127.0.0.1:8090 debug bind
+cmu-quiver/scripts/render-examples.sh             # uses the 127.0.0.1:8090 debug bind
 
 # Network path from the web container:
 docker compose exec web curl -s http://quillmark-mcp:8080/mcp -X POST \

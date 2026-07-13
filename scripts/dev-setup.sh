@@ -18,13 +18,6 @@ docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon not running."; exit 
 # --- Submodule: quillmark-mcp ------------------------------------------------
 git submodule update --init
 
-# --- Sibling repo: cmu-quiver (mounted read-only into quillmark-mcp) ----------
-if [[ ! -d ../cmu-quiver ]]; then
-  echo "Cloning cmu-quiver sibling repo..."
-  git clone https://github.com/tonguetoquill/cmu-quiver.git ../cmu-quiver \
-    || echo "WARNING: cmu-quiver clone failed (repo may not exist yet). Place it manually at ../cmu-quiver or document generation will have no quills."
-fi
-
 # --- .env ---------------------------------------------------------------------
 [[ -f .env ]] || cp .example.env .env
 if ! grep -Eq '^DB_PASSWORD=.+' .env; then
